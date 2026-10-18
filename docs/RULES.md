@@ -174,7 +174,7 @@ value(node, hp) = nodeReward(node) + riskPenalty(hp')
 ## 已知限制
 
 - 求解器只覆盖已建模牌；能力牌、X 费、抽牌、随机目标会降级/排除
-- 遗物、药水、敌人本回合的 buff/debuff 未计入（例如敌人加力量后再攻击）
+- 遗物、药水、抽牌、敌人本回合的 buff/debuff、Artifact/Intangible 等特殊能力未计入
 - 毒/易伤/虚弱按标准规则模拟，未计 Artifact、Paper Phrog 等修正
 - 没有读卡牌 `Tags`/`Keywords`，协同是粗粒度
 - 地图掉血仍是**期望值**，不是用求解器逐场模拟

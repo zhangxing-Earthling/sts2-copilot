@@ -371,7 +371,7 @@ def _combat_solver(state):
     advice.append(_advice("combat.solver_detail", detail, "info"))
     advice.append(_advice(
         "combat.solver_assumptions",
-        "求解只含已建模卡牌；未计遗物、药水、抽牌与随机目标，实际结果以游戏为准。",
+        "求解只含已建模卡牌；未计遗物、药水、抽牌、随机目标与特殊能力修正，实际结果以游戏为准。",
         "info"))
 
     if result.unmodeled:
