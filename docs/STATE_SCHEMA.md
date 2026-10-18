@@ -17,6 +17,7 @@ C# `GameState` 序列化为 **PascalCase** JSON，POST 到 Python `/advise`。
 | `CurrentRoom` / `Encounter` | string | 房间类型 / 遭遇 id |
 | `Hand` / `DeckCards` / `CardChoices` | CardInfo[] | 手牌 / 牌组 / 三选一 |
 | `Enemies` | EnemyInfo[] | 敌人 |
+| `PlayerPowers` | object | 玩家能力层数，例如 `{"StrengthPower":2}` |
 | `Relics` / `Potions` | string[] | 本地化名称 |
 | `MapChoices` | MapNodeInfo[] | 当前节点可走的下一层 |
 | `MapNodes` | MapNodeInfo[] | 全图节点（含 Boss） |
@@ -32,12 +33,14 @@ C# `GameState` 序列化为 **PascalCase** JSON，POST 到 Python `/advise`。
 | `Id` | 内部 id，例如 `StrikeSilent` |
 | `Name` | 中文名 |
 | `Cost` / `CostsX` | 费用 / 是否 X 费 |
-| `Type` | 1 Attack / 2 Skill / 3 Power / 4 Status / 5 Curse |
+| `Type` | 1 Attack / 2 Skill / 3 Power / 4 Status / 5 Curse / 6 Quest |
+| `Target` | `TargetType`：0 None / 1 Self / 2 AnyEnemy / 3 AllEnemies / 4 RandomEnemy |
 | `Rarity` | 1 Basic / 2 Common / 3 Uncommon / 4 Rare / 5 Ancient |
 | `Upgraded` | 升级等级 |
 | `Playable` | 按当前能量粗判 |
 | `Damage` / `Block` / `Poison` | 从 `DynamicVars` 读的基值 |
 | `Hits` | 段数（`Repeat`，默认 1） |
+| `Vars` | 全部 `DynamicVars` 基值，例如 `{"Damage":6}`、`{"WeakPower":1}` |
 
 ## EnemyInfo
 
@@ -46,8 +49,17 @@ C# `GameState` 序列化为 **PascalCase** JSON，POST 到 Python `/advise`。
 | `Id` / `Name` | 内部 id / 中文名 |
 | `Hp` / `MaxHp` / `Block` | 生命/格挡 |
 | `Intent` | 本地化意图（攻击/防御/强化…） |
-| `Damage` / `Hits` | 已按力量/虚弱/易伤还原的伤害与段数 |
-| `IsPrimary` | 是否主敌人 |
+| `Damage` / `Hits` | 当前修正后的总伤害 / 总段数 |
+| `Powers` | 能力层数，例如 `{"VulnerablePower":1}` |
+| `Attacks` | 本回合每段攻击的 `BaseDamage` / `Hits` / `Damage` |
+
+### EnemyAttackInfo
+
+| 字段 | 说明 |
+|---|---|
+| `BaseDamage` | 修正前单段伤害 |
+| `Hits` | 段数 |
+| `Damage` | 当前修正后的总伤害（Base 经力量/虚弱/易伤） |
 
 ## MapNodeInfo
 
@@ -76,9 +88,10 @@ C# `GameState` 序列化为 **PascalCase** JSON，POST 到 Python `/advise`。
   "Energy": 0, "MaxEnergy": 3, "Stars": 0,
   "Turn": 3, "Phase": 3, "InCombat": false,
   "Hand": [],
-  "DeckCards": [{ "Id": "StrikeSilent", "Name": "打击", "Cost": 1, "Type": 1, "Damage": 6 }],
+  "DeckCards": [{ "Id": "StrikeSilent", "Name": "打击", "Cost": 1, "Type": 1, "Target": 2, "Damage": 6, "Vars": { "Damage": 6 } }],
   "CardChoices": [],
   "Enemies": [],
+  "PlayerPowers": { "StrengthPower": 2 },
   "Relics": ["蛇之戒指", "奥术卷轴"],
   "Potions": [],
   "MapChoices": [{ "Col": 3, "Row": 2, "Type": 1, "TypeName": "未知" }],
@@ -93,7 +106,8 @@ C# `GameState` 序列化为 **PascalCase** JSON，POST 到 Python `/advise`。
 ```json
 {
   "advice": [
-    { "ruleId": "map.recommend", "text": "下一层推荐：未知（评分 1.1）", "severity": "good" }
+    { "ruleId": "combat.solver", "text": "最优顺序：打击→虫 → 打击→虫；可斩杀…", "severity": "good" },
+    { "ruleId": "combat.solver_detail", "text": "敌方受击后剩 0 HP；…", "severity": "info" }
   ],
   "source": "python"
 }

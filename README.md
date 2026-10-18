@@ -25,7 +25,8 @@
 
 - **战斗**：HP/格挡/能量/星星/抽牌/弃牌/牌组、手牌（名称/费用/伤害/格挡/毒）、敌人 HP/格挡/意图
 - **意图伤害**：按 `Hook.ModifyDamage` 还原——基础伤害 + 攻击者力量，再乘攻击者虚弱/玩家易伤，最后乘段数
-- **战斗建议**：致死预警、预计掉血、可以全挡、可斩杀（粗算）、能量浪费、0 费牌
+- **战斗求解**：枚举本回合出牌顺序，按“斩杀 > 存活 > 最少掉血 > 敌方剩余 HP > 留能量”评分；输出每张牌的目标、格挡、敌方剩余 HP、预计掉血
+- **未知牌降级**：X 费/能力/抽牌等未建模效果不猜，明确列出并回退旧粗算
 - **三选一**：读三张候选，按稀有度/效果/费用/牌组密度/毒协同评分并推荐
 - **地图**：读全图节点/边 + Boss，Python 做 HP 状态 DAG DP，输出推荐路线、预计结束 HP、评分
 - **中文名**：直接读游戏内存里的 `LocManager` 表
@@ -38,7 +39,7 @@
 C# 客户端（只读内存 + 第二窗口 + 日志）
    │  POST http://127.0.0.1:8765/advise
    ▼
-Python 规则服务（engine.py / server.py）
+Python 规则服务（engine.py / combat.py / server.py）
    │  {"advice": [...], "source": "python"}
    ▼
 C# 渲染；Python 不可用时回退本地 Advisor（状态栏 local）
@@ -72,7 +73,9 @@ src/Sts2Copilot.App/
   MainWindow.xaml*  第二窗口 UI
 py/rules/
   engine.py         规则/数学核心（战斗、奖励、地图）
+  combat.py         本回合出牌 DFS/记忆化求解器
   server.py         127.0.0.1:8765 HTTP 服务
+py/tests/           Python 单元测试（无游戏也能跑）
 tools/clrdprobe/    调试探针（run / rewards / map / fields）
 tools/decomp/       游戏更新后重新反编译
 docs/               架构、schema、规则、路线图、ADR
@@ -95,12 +98,14 @@ prompts/            DeepSeek 复盘 / 规则 patch 提示词
 - 特殊意图（非 `DamageCalc` 闭包）可能显示 0 伤害
 - 出牌是推断，不是精确事件；后续改读 `CombatManager.History`
 - 卡牌描述、遗物计数器、能力层数还没显示
+- 求解器只覆盖攻击/格挡/毒/弱/易伤/力量/敏捷；X 费、能力、抽牌、随机目标会降级
+- 求解器未计遗物、药水、抽牌顺序和敌人本回合的 buff/debuff 意图
 - 地图掉血是期望值，不是按当前牌组模拟战斗
 - 卡牌协同只到“攻击/格挡密度 + 毒”，没有 tag/关键词
 
 ## 下一步
 
-1. 本回合出牌顺序求解器（numpy）
+1. P1.5 实机校准：预测掉血 vs 实际，补遗物/药水/抽牌/敌人 buff
 2. 记录 `reward_pick` / `map_pick`
 3. 局末 DeepSeek 复盘 + 规则 patch 审核
 4. 商店/事件/营地界面

@@ -13,6 +13,7 @@ public sealed class CardInfo
     public int Cost { get; set; }
     public bool CostsX { get; set; }
     public int Type { get; set; }
+    public int Target { get; set; }
     public int Rarity { get; set; }
     public int Upgraded { get; set; }
     public bool Playable { get; set; }
@@ -20,6 +21,14 @@ public sealed class CardInfo
     public int Block { get; set; }
     public int Poison { get; set; }
     public int Hits { get; set; } = 1;
+    public Dictionary<string, double> Vars { get; set; } = new();
+}
+
+public sealed class EnemyAttackInfo
+{
+    public int BaseDamage { get; set; }
+    public int Hits { get; set; } = 1;
+    public int Damage { get; set; }
 }
 
 public sealed class EnemyInfo
@@ -32,6 +41,8 @@ public sealed class EnemyInfo
     public string Intent { get; set; } = "";
     public int Damage { get; set; }
     public int Hits { get; set; }
+    public Dictionary<string, int> Powers { get; set; } = new();
+    public List<EnemyAttackInfo> Attacks { get; set; } = new();
 }
 
 public sealed class MapNodeInfo
@@ -88,6 +99,7 @@ public sealed class GameState
     public int MapType { get; set; }
     public string MapTypeName { get; set; } = "";
     public List<EnemyInfo> Enemies { get; set; } = new();
+    public Dictionary<string, int> PlayerPowers { get; set; } = new();
     public List<string> Relics { get; set; } = new();
     public List<string> Potions { get; set; } = new();
 }
@@ -229,6 +241,7 @@ public sealed class MemoryReader : IDisposable
         result.Hp = ReadInt(creature, "_currentHp");
         result.MaxHp = ReadInt(creature, "_maxHp");
         result.Block = ReadInt(creature, "_block");
+        result.PlayerPowers = ReadPowers(creature);
         result.Gold = ReadInt(player, "_gold");
         result.DeckCount = Count(ReadObj(player, "<Deck>k__BackingField"));
         foreach (ClrObject card in ReadList(ReadObj(ReadObj(player, "<Deck>k__BackingField"), "_cards")))
@@ -293,7 +306,8 @@ public sealed class MemoryReader : IDisposable
                     Id = Entry(monster) ?? "",
                     Hp = ReadInt(enemy, "_currentHp"),
                     MaxHp = ReadInt(enemy, "_maxHp"),
-                    Block = ReadInt(enemy, "_block")
+                    Block = ReadInt(enemy, "_block"),
+                    Powers = ReadPowers(enemy)
                 };
                 info.Name = Localize("monsters", info.Id, ".name");
 
@@ -302,11 +316,18 @@ public sealed class MemoryReader : IDisposable
                 {
                     string name = intent.Type?.Name.Split('.').Last() ?? "?";
                     names.Add(IntentName(name.Replace("Intent", "")));
-                    int damage = IntentDamage(intent, enemy, creature);
+                    (int baseDamage, int repeat) = IntentParts(intent);
+                    int damage = IntentDamage(baseDamage, repeat, enemy, creature);
                     if (damage > 0)
                     {
                         info.Damage += damage;
-                        info.Hits += Math.Max(1, ReadInt(intent, "_repeat"));
+                        info.Hits += repeat;
+                        info.Attacks.Add(new EnemyAttackInfo
+                        {
+                            BaseDamage = baseDamage,
+                            Hits = repeat,
+                            Damage = damage
+                        });
                     }
                 }
 
@@ -328,6 +349,7 @@ public sealed class MemoryReader : IDisposable
         int block = (int)(GetVar(vars, "Block") + GetVar(vars, "CalculatedBlock"));
         int poison = (int)(GetVar(vars, "PoisonPower") + GetVar(vars, "Poison"));
         int hits = Math.Max(1, (int)GetVar(vars, "Repeat"));
+        bool playable = type != 4 && type != 5 && (costsX ? energy > 0 : cost >= 0 && cost <= energy);
 
         return new CardInfo
         {
@@ -336,13 +358,15 @@ public sealed class MemoryReader : IDisposable
             Cost = cost,
             CostsX = costsX,
             Type = type,
+            Target = ReadInt(card, "<TargetType>k__BackingField"),
             Rarity = ReadInt(card, "<Rarity>k__BackingField"),
             Upgraded = ReadInt(card, "_currentUpgradeLevel"),
-            Playable = costsX ? energy > 0 : cost <= energy && type != 4 && type != 5,
+            Playable = playable,
             Damage = Math.Max(0, damage),
             Block = Math.Max(0, block),
             Poison = Math.Max(0, poison),
-            Hits = hits
+            Hits = hits,
+            Vars = vars.ToDictionary(kv => kv.Key, kv => (double)kv.Value)
         };
     }
 
@@ -669,7 +693,7 @@ public sealed class MemoryReader : IDisposable
         }
     }
 
-    private static int IntentDamage(ClrObject intent, ClrObject attacker, ClrObject target)
+    private static (int baseDamage, int repeat) IntentParts(ClrObject intent)
     {
         int baseDamage = 0;
         ClrObject calc = ReadObj(intent, "<DamageCalc>k__BackingField");
@@ -706,6 +730,11 @@ public sealed class MemoryReader : IDisposable
             }
         }
 
+        return (baseDamage, Math.Max(1, ReadInt(intent, "_repeat")));
+    }
+
+    private static int IntentDamage(int baseDamage, int repeat, ClrObject attacker, ClrObject target)
+    {
         if (baseDamage <= 0)
         {
             return 0;
@@ -723,19 +752,31 @@ public sealed class MemoryReader : IDisposable
             damage *= 1.5m;
         }
 
-        int perHit = Math.Max(0, (int)damage);
-        int repeat = Math.Max(1, ReadInt(intent, "_repeat"));
-        return perHit * repeat;
+        return Math.Max(0, (int)damage) * repeat;
+    }
+
+    private static Dictionary<string, int> ReadPowers(ClrObject creature)
+    {
+        var result = new Dictionary<string, int>();
+        foreach (ClrObject power in ReadList(ReadObj(creature, "_powers")))
+        {
+            string id = power.Type?.Name.Split('.').Last() ?? Entry(power) ?? "";
+            if (!string.IsNullOrEmpty(id))
+            {
+                result[id] = ReadInt(power, "_amount");
+            }
+        }
+
+        return result;
     }
 
     private static int GetPowerAmount(ClrObject creature, string powerName)
     {
-        foreach (ClrObject power in ReadList(ReadObj(creature, "_powers")))
+        foreach ((string id, int amount) in ReadPowers(creature))
         {
-            string id = power.Type?.Name.Split('.').Last() ?? Entry(power) ?? "";
             if (id.Contains(powerName, StringComparison.OrdinalIgnoreCase))
             {
-                return ReadInt(power, "_amount");
+                return amount;
             }
         }
 
@@ -1106,7 +1147,26 @@ public sealed class MemoryReader : IDisposable
         try
         {
             ClrObject energy = card.ReadObjectField("_energyCost");
-            return (energy.ReadField<int>("_base"), energy.ReadField<bool>("<CostsX>k__BackingField"));
+            if (!energy.IsNull)
+            {
+                int cost = energy.ReadField<int>("_base");
+                bool costsX = energy.ReadField<bool>("<CostsX>k__BackingField");
+                if (cost < 0)
+                {
+                    cost = card.ReadField<int>("<CanonicalEnergyCost>k__BackingField");
+                }
+
+                return (cost, costsX);
+            }
+        }
+        catch
+        {
+            // fall through to the canonical cost
+        }
+
+        try
+        {
+            return (card.ReadField<int>("<CanonicalEnergyCost>k__BackingField"), false);
         }
         catch
         {

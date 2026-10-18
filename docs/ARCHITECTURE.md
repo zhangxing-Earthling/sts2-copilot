@@ -5,7 +5,7 @@
 | 组件 | 语言 | 职责 |
 |---|---|---|
 | `Sts2Copilot.App` | C# / WPF | 读内存、显示第二窗口、写 JSONL、调用规则服务 |
-| `py/rules` | Python | 战斗数学、选牌评分、地图评分、后续 DP/求解器 |
+| `py/rules` | Python | 战斗数学、本回合求解器、选牌评分、地图 DP |
 | `tools/clrdprobe` | C# | 调试探针，验证字段/地图/奖励 |
 | `tools/decomp` | C# | 游戏更新后反编译 `sts2.dll` |
 
@@ -32,6 +32,23 @@
 - 只监听 `127.0.0.1`，不对外网开放
 
 C# 通过环境变量 `STS2_COPILOT_RULES_URL` 可改地址。
+
+## 本回合求解器
+
+`py/rules/combat.py`：
+
+```
+GameState
+  -> 只保留已建模牌（Cost/Damage/Block/Poison/Target/Vars）
+  -> DFS + 记忆化，状态含手牌集合、能量、敌人 HP/格挡/能力
+  -> 结算毒、敌人攻击、格挡、目标死亡
+  -> 按“斩杀 > 存活 > 最少掉血 > 敌方 HP > 留能量”排序
+  -> engine.py 输出 combat.solver* 建议
+```
+
+- 上限 15000 节点 / 220ms，低于 C# 500ms HTTP 超时
+- 未知效果不猜：`combat.solver_unmodeled` 列出卡牌和原因
+- 未建模牌过多或 Python 不可用时，`engine.py` 回退旧粗算
 
 ## 日志
 

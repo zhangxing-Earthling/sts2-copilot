@@ -6,6 +6,8 @@ Output: {"advice": [{"ruleId", "text", "severity"}], "source": "python"}
 
 from __future__ import annotations
 
+from combat import solve
+
 TYPE_NAMES = {
     0: "未定",
     1: "未知",
@@ -298,7 +300,98 @@ def _map(state):
     return advice
 
 
-def _combat(state):
+def _enemy_labels(names):
+    counts = {}
+    labels = []
+    for name in names:
+        counts[name] = counts.get(name, 0) + 1
+        labels.append(name if counts[name] == 1 else f"{name}#{counts[name]}")
+    return labels
+
+
+def _format_sequence(result):
+    labels = _enemy_labels(result.enemy_names)
+    cards = {card.index: card.name for card in result.modeled}
+    parts = []
+    for play in result.plays:
+        text = play.name
+        if play.target_all:
+            text += "→全体"
+        elif play.target_index is not None and play.target_index < len(labels):
+            text += f"→{labels[play.target_index]}"
+        if play.discard_index is not None:
+            text += f"（弃{cards.get(play.discard_index, '?')}）"
+        parts.append(text)
+    return " → ".join(parts)
+
+
+def _combat_solver(state):
+    result, error = solve(state)
+    if result is None or not result.modeled:
+        return None, error or "没有可精确模拟的牌"
+
+    advice = []
+    used_energy = sum(p.cost for p in result.plays)
+    outgoing = result.damage_dealt
+    block_gain = max(0, result.block_left - int(state.get("Block", 0)))
+    loss = result.outcome.hp_loss
+    hp_after = result.outcome.hp_after
+
+    if result.plays:
+        head = f"最优顺序：{_format_sequence(result)}"
+    else:
+        head = "本回合不出牌最优"
+
+    if result.outcome.lethal:
+        severity = "good"
+        tail = "可斩杀"
+    elif hp_after <= 0:
+        severity = "danger"
+        tail = "会致死，必须用药水或改打法"
+    elif loss == 0:
+        severity = "good"
+        tail = "不掉血"
+    else:
+        severity = "warn"
+        tail = f"预计掉 {loss} 血"
+
+    advice.append(_advice(
+        "combat.solver",
+        f"{head}；{tail}（能量 {used_energy}/{int(state.get('Energy', 0))}，"
+        f"有效伤害 {outgoing}，格挡 +{block_gain}）",
+        severity))
+
+    detail = (
+        f"敌方受击后剩 {result.outcome.enemy_hp_left} HP；"
+        f"敌方总攻击 {result.outcome.incoming}，我方格挡 {result.block_left}，"
+        f"结算后 HP {hp_after}/{int(state.get('MaxHp', 0) or 0)}"
+    )
+    if result.outcome.poison_kills:
+        detail += f"；毒将在敌方回合开始击杀 {result.outcome.poison_kills} 个敌人"
+    advice.append(_advice("combat.solver_detail", detail, "info"))
+    advice.append(_advice(
+        "combat.solver_assumptions",
+        "求解只含已建模卡牌；未计遗物、药水、抽牌与随机目标，实际结果以游戏为准。",
+        "info"))
+
+    if result.unmodeled:
+        shown = "、".join(f"{name}（{reason}）" for name, reason in result.unmodeled[:6])
+        more = "" if len(result.unmodeled) <= 6 else f" 等 {len(result.unmodeled)} 张"
+        advice.append(_advice(
+            "combat.solver_unmodeled",
+            f"未纳入求解：{shown}{more}；以上结果只含已建模牌。",
+            "info"))
+
+    if result.truncated:
+        advice.append(_advice(
+            "combat.solver_truncated",
+            "搜索达到时间/节点上限，序列是当前最优近似。",
+            "warn"))
+
+    return advice, None
+
+
+def _combat_rough(state):
     advice = []
     enemies = state.get("Enemies") or []
     hand = state.get("Hand") or []
@@ -343,6 +436,22 @@ def _combat(state):
         if free:
             advice.append(_advice("resources.free_cards", "能量已空，但还有 0 费牌可打：" + _names(free), "good"))
     return advice
+
+
+def _combat(state):
+    solved, error = _combat_solver(state)
+    rough = _combat_rough(state)
+    if solved is not None:
+        extras = [
+            item for item in rough
+            if item["ruleId"].startswith("resources.") or item["ruleId"].startswith("potion.")
+        ]
+        return solved + extras
+
+    advice = []
+    if error and error != "手牌为空":
+        advice.append(_advice("combat.solver_unavailable", f"未使用求解器：{error}", "info"))
+    return advice + rough
 
 
 def _overview(state):
