@@ -16,4 +16,9 @@
     <PackageReference Include="System.Collections.Immutable" Version="10.0.13" />
     <PackageReference Include="System.Text.Json" Version="10.0.13" />
   </ItemGroup>
+  <ItemGroup>
+    <Content Include="..\..\py\rules\*.py" Link="rules\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\py\rules\data\*.json" Link="rules\data\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\prompts\*.md" Link="prompts\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

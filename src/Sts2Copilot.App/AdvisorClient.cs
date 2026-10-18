@@ -22,11 +22,11 @@ public sealed class AdvisorClient : IDisposable
         };
     }
 
-    public bool LastCallUsedPython { get; private set; }
+    public SolverSnapshot? LastSolver { get; private set; }
 
     public async Task<List<Advice>?> GetAdviceAsync(GameState state)
     {
-        LastCallUsedPython = false;
+        LastSolver = null;
         try
         {
             string json = JsonSerializer.Serialize(state);
@@ -48,7 +48,7 @@ public sealed class AdvisorClient : IDisposable
                 return null;
             }
 
-            LastCallUsedPython = true;
+            LastSolver = dto.Solver;
             return dto.Advice
                 .Select(a => new Advice(
                     string.IsNullOrEmpty(a.RuleId) ? "python" : a.RuleId,
@@ -70,6 +70,7 @@ public sealed class AdvisorClient : IDisposable
     private sealed class Response
     {
         public List<Item>? Advice { get; set; }
+        public SolverSnapshot? Solver { get; set; }
     }
 
     private sealed class Item

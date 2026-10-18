@@ -10,8 +10,12 @@ ref/
 tools/dotnet/
 tools/tools/
 data/
+# generated model metadata (not raw game assets/source)
+!py/rules/data/
+!py/rules/data/catalog.json
 
 # logs and captures
+logs/
 *.log
 captures/
 publish.log

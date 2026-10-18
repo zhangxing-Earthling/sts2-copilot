@@ -30,11 +30,11 @@ public static class Advisor
             foreach ((CardInfo card, double score) in ranked)
             {
                 string cost = card.CostsX ? "X" : card.Cost.ToString();
-                lines.Add($"{card.Name}（{cost}费）  评分 {score:F1}");
+                lines.Add($"{DisplayName(card)}（{cost}费）  评分 {score:F1}");
             }
 
             list.Add(new Advice("reward.recommend",
-                $"推荐：{ranked[0].card.Name}（评分 {ranked[0].score:F1}）", "good"));
+                $"推荐：{DisplayName(ranked[0].card)}（评分 {ranked[0].score:F1}）", "good"));
             list.Add(new Advice("reward.card_choice", "三选一：\n" + string.Join("\n", lines), "good"));
             if (ranked.Count >= 2 && ranked[0].score - ranked[1].score < 0.5)
             {
@@ -275,9 +275,19 @@ public static class Advisor
         return (best, chosen);
     }
 
+    private static string DisplayName(CardInfo card)
+    {
+        if (card.Upgraded <= 0)
+        {
+            return card.Name;
+        }
+
+        return card.Upgraded > 1 ? $"{card.Name}+{card.Upgraded}" : $"{card.Name}+";
+    }
+
     private static string Names(IEnumerable<CardInfo> cards)
     {
-        string text = string.Join("、", cards.Select(c => c.Name));
+        string text = string.Join("、", cards.Select(DisplayName));
         return string.IsNullOrEmpty(text) ? "（无）" : text;
     }
 

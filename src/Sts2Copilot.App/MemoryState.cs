@@ -28,7 +28,75 @@ public sealed class EnemyAttackInfo
 {
     public int BaseDamage { get; set; }
     public int Hits { get; set; } = 1;
-    public int Damage { get; set; }
+}
+
+public sealed class CombatEventInfo
+{
+    public string Kind { get; set; } = "";
+    public string Id { get; set; } = "";
+    public string Name { get; set; } = "";
+    public string? Target { get; set; }
+    public int? TargetHp { get; set; }
+    public int? TargetMaxHp { get; set; }
+    public int PlayIndex { get; set; }
+    public int PlayCount { get; set; } = 1;
+    public bool AutoPlay { get; set; }
+    public int EnergySpent { get; set; }
+    public int StarsSpent { get; set; }
+    public decimal? Amount { get; set; }
+    public int? Blocked { get; set; }
+    public int? Unblocked { get; set; }
+    public int? Overkill { get; set; }
+    public string? Source { get; set; }
+    public string? Receiver { get; set; }
+    public string? Dealer { get; set; }
+    public bool? FromHandDraw { get; set; }
+}
+
+public sealed class EventOptionInfo
+{
+    public int Index { get; set; }
+    public string? TextKey { get; set; }
+    public string Title { get; set; } = "";
+    public string Description { get; set; } = "";
+    public bool Locked { get; set; }
+    public bool Proceed { get; set; }
+    public string? RelicId { get; set; }
+    public string? RelicName { get; set; }
+    public int RelicRarity { get; set; }
+}
+
+public sealed class ShopItemInfo
+{
+    public int Index { get; set; }
+    public string Kind { get; set; } = "";
+    public string Name { get; set; } = "";
+    public string Description { get; set; } = "";
+    public int Cost { get; set; }
+    public bool Affordable { get; set; }
+    public string? RelicId { get; set; }
+    public string? RelicName { get; set; }
+    public string? PotionId { get; set; }
+    public CardInfo? Card { get; set; }
+}
+
+public sealed class RestOptionInfo
+{
+    public int Index { get; set; }
+    public string OptionId { get; set; } = "";
+    public string Title { get; set; } = "";
+    public string Description { get; set; } = "";
+    public bool Enabled { get; set; }
+    public int HealAmount { get; set; }
+}
+
+public sealed class RelicChoiceInfo
+{
+    public int Index { get; set; }
+    public string Id { get; set; } = "";
+    public string Name { get; set; } = "";
+    public string Description { get; set; } = "";
+    public int Rarity { get; set; }
 }
 
 public sealed class EnemyInfo
@@ -65,6 +133,7 @@ public sealed class GameState
 {
     public string GameVersion { get; set; } = "";
     public string Seed { get; set; } = "";
+    public long RunStartTime { get; set; }
     public string Character { get; set; } = "";
     public string CurrentRoom { get; set; } = "";
     public string Encounter { get; set; } = "";
@@ -83,25 +152,42 @@ public sealed class GameState
     public int DrawCount { get; set; }
     public int DiscardCount { get; set; }
     public int DeckCount { get; set; }
-    public int Round { get; set; }
-    public int Side { get; set; }
     public bool InCombat { get; set; }
     public string? ValidationError { get; set; }
     public List<CardInfo> Hand { get; set; } = new();
     public List<CardInfo> DeckCards { get; set; } = new();
     public List<CardInfo> CardChoices { get; set; } = new();
+    public List<RelicChoiceInfo> RewardRelics { get; set; } = new();
+    public List<string> RewardPotions { get; set; } = new();
+    public List<string> RewardPotionIds { get; set; } = new();
     public int RewardGold { get; set; }
     public List<MapNodeInfo> MapChoices { get; set; } = new();
     public List<MapNodeInfo> MapNodes { get; set; } = new();
     public List<MapEdgeInfo> MapEdges { get; set; } = new();
     public int MapCol { get; set; }
     public int MapRow { get; set; }
-    public int MapType { get; set; }
     public string MapTypeName { get; set; } = "";
+    public bool InEvent { get; set; }
+    public string EventId { get; set; } = "";
+    public string EventTitle { get; set; } = "";
+    public string EventDescription { get; set; } = "";
+    public bool EventIsAncient { get; set; }
+    public Dictionary<string, double> EventVars { get; set; } = new();
+    public List<EventOptionInfo> EventOptions { get; set; } = new();
+    public bool InShop { get; set; }
+    public List<ShopItemInfo> ShopItems { get; set; } = new();
+    public bool InRestSite { get; set; }
+    public List<RestOptionInfo> RestOptions { get; set; } = new();
+    public bool InTreasure { get; set; }
+    public List<RelicChoiceInfo> RelicChoices { get; set; } = new();
     public List<EnemyInfo> Enemies { get; set; } = new();
+    public List<CombatEventInfo> CombatEvents { get; set; } = new();
     public Dictionary<string, int> PlayerPowers { get; set; } = new();
     public List<string> Relics { get; set; } = new();
+    public List<string> RelicIds { get; set; } = new();
+    public Dictionary<string, int> RelicCounters { get; set; } = new();
     public List<string> Potions { get; set; } = new();
+    public List<string> PotionIds { get; set; } = new();
 }
 
 /// <summary>
@@ -116,12 +202,29 @@ public sealed class MemoryReader : IDisposable
     private ClrRuntime? _runtime;
     private ClrAppDomain? _domain;
     private ClrStaticField? _instanceField;
+    private ClrStaticField? _combatInstanceField;
+    private int _historySeen;
+    private int _historyEmptyPolls;
+    private int _historyShortPolls;
+    private bool _historyInitialized;
+    private bool _historyAvailable;
+    private readonly HashSet<ulong> _historyEmitted = new();
     private readonly Dictionary<string, Dictionary<string, string>> _loc = new();
     private string _dataDir = Path.Combine(DefaultGameDir, "data_sts2_windows_x86_64");
 
     public int Pid { get; private set; }
     public string? Error { get; private set; }
     public string GameVersion { get; private set; } = "";
+
+    /// <summary>
+    /// True when CombatManager.History could be read on the last poll. When true,
+    /// card_play/potion_use are authoritative and the old inferred `action` fallback
+    /// must not run; when false, History is unavailable and the fallback is all we have.
+    /// </summary>
+    public bool HistoryAvailable => _historyAvailable;
+
+    /// <summary>Number of History entries skipped because their address was already emitted.</summary>
+    public int HistoryDuplicatesSkipped { get; private set; }
 
     public bool Attach(int pid)
     {
@@ -161,6 +264,16 @@ public sealed class MemoryReader : IDisposable
                 return false;
             }
 
+            ClrType? combatManager = module?.GetTypeByName("MegaCrit.Sts2.Core.Combat.CombatManager");
+            _combatInstanceField = combatManager?.StaticFields.FirstOrDefault(f => f.Name.Contains("Instance"));
+            _historySeen = 0;
+            _historyEmptyPolls = 0;
+            _historyShortPolls = 0;
+            _historyInitialized = false;
+            _historyAvailable = false;
+            _historyEmitted.Clear();
+            HistoryDuplicatesSkipped = 0;
+
             LoadLocalization(module!);
             Pid = pid;
             return true;
@@ -191,8 +304,14 @@ public sealed class MemoryReader : IDisposable
 
             GameState result = BuildState(state);
             result.GameVersion = GameVersion;
+            result.RunStartTime = ReadLong(runManager, "_startTime");
             ReadRewards(result, runManager);
             ReadMap(result, state);
+            ReadEvent(result, runManager, state);
+            ReadShop(result, runManager, state);
+            ReadRestSite(result, runManager, state);
+            ReadTreasure(result, runManager, state);
+            ReadCombatEvents(result);
             string? validation = Validate(result);
             if (validation != null)
             {
@@ -255,6 +374,20 @@ public sealed class MemoryReader : IDisposable
             if (!string.IsNullOrEmpty(id))
             {
                 result.Relics.Add(Localize("relics", id, ".title"));
+                result.RelicIds.Add(id);
+                if (string.Equals(id, "PenNib", StringComparison.Ordinal))
+                {
+                    int attacks = ReadInt(relic, "<AttacksPlayed>k__BackingField");
+                    if (attacks < 0)
+                    {
+                        attacks = ReadInt(relic, "_attacksPlayed");
+                    }
+
+                    if (attacks >= 0)
+                    {
+                        result.RelicCounters[id] = attacks % 10;
+                    }
+                }
             }
         }
 
@@ -269,6 +402,7 @@ public sealed class MemoryReader : IDisposable
             if (!string.IsNullOrEmpty(id))
             {
                 result.Potions.Add(Localize("potions", id, ".title"));
+                result.PotionIds.Add(id);
             }
         }
 
@@ -285,15 +419,13 @@ public sealed class MemoryReader : IDisposable
 
             foreach (ClrObject card in ReadList(ReadObj(ReadObj(pcs, "<Hand>k__BackingField"), "_cards")))
             {
-                result.Hand.Add(BuildCard(card, result.Energy));
+                result.Hand.Add(BuildCard(card, result.Energy, result.DrawCount));
             }
         }
 
         if (!combatState.IsNull)
         {
             result.InCombat = true;
-            result.Round = ReadInt(combatState, "<RoundNumber>k__BackingField");
-            result.Side = ReadInt(combatState, "<CurrentSide>k__BackingField");
 
             foreach (ClrObject enemy in ReadList(ReadObj(combatState, "_enemies")))
             {
@@ -325,8 +457,7 @@ public sealed class MemoryReader : IDisposable
                         info.Attacks.Add(new EnemyAttackInfo
                         {
                             BaseDamage = baseDamage,
-                            Hits = repeat,
-                            Damage = damage
+                            Hits = repeat
                         });
                     }
                 }
@@ -339,7 +470,7 @@ public sealed class MemoryReader : IDisposable
         return result;
     }
 
-    private CardInfo BuildCard(ClrObject card, int energy)
+    private CardInfo BuildCard(ClrObject card, int energy, int drawCount = int.MaxValue)
     {
         (int cost, bool costsX) = CardCost(card);
         int type = ReadInt(card, "<Type>k__BackingField");
@@ -350,6 +481,11 @@ public sealed class MemoryReader : IDisposable
         int poison = (int)(GetVar(vars, "PoisonPower") + GetVar(vars, "Poison"));
         int hits = Math.Max(1, (int)GetVar(vars, "Repeat"));
         bool playable = type != 4 && type != 5 && (costsX ? energy > 0 : cost >= 0 && cost <= energy);
+        if (id == "GrandFinale" && drawCount > 0)
+        {
+            // CardModel.IsPlayable: draw pile must be empty.
+            playable = false;
+        }
 
         return new CardInfo
         {
@@ -446,6 +582,37 @@ public sealed class MemoryReader : IDisposable
         if (type == "GoldReward")
         {
             result.RewardGold += ReadInt(reward, "<Amount>k__BackingField");
+            return;
+        }
+
+        if (type == "RelicReward")
+        {
+            ClrObject relic = ReadObj(reward, "_relic");
+            if (!relic.IsNull)
+            {
+                string id = Entry(relic) ?? "";
+                result.RewardRelics.Add(new RelicChoiceInfo
+                {
+                    Index = result.RewardRelics.Count,
+                    Id = id,
+                    Name = Localize("relics", id, ".title"),
+                    Description = CleanLocText(Localize("relics", id, ".description")),
+                    Rarity = Math.Max(0, ReadInt(relic, "<Rarity>k__BackingField"))
+                });
+            }
+
+            return;
+        }
+
+        if (type == "PotionReward")
+        {
+            ClrObject potion = ReadObj(reward, "<Potion>k__BackingField");
+            if (!potion.IsNull)
+            {
+                string id = Entry(potion) ?? "";
+                result.RewardPotions.Add(Localize("potions", id, ".title"));
+                result.RewardPotionIds.Add(id);
+            }
         }
     }
 
@@ -476,7 +643,14 @@ public sealed class MemoryReader : IDisposable
                 (int col, int row) = visited[^1];
                 if (col >= 0 && col < cols && row >= 0 && row < rows)
                 {
-                    current = grid.GetObjectValue(new[] { col, row });
+                    ClrObject visitedPoint = grid.GetObjectValue(new[] { col, row });
+                    // At the start of an act the visited coordinate can be the
+                    // starting point at row 0, which is not stored in Grid.
+                    // Keep StartingMapPoint instead of overwriting it with null.
+                    if (!visitedPoint.IsNull)
+                    {
+                        current = visitedPoint;
+                    }
                 }
             }
 
@@ -488,8 +662,7 @@ public sealed class MemoryReader : IDisposable
             (int curCol, int curRow) = ReadCoord(current);
             result.MapCol = curCol;
             result.MapRow = curRow;
-            result.MapType = ReadInt(current, "<PointType>k__BackingField");
-            result.MapTypeName = MapTypeName(result.MapType);
+            result.MapTypeName = MapTypeName(ReadInt(current, "<PointType>k__BackingField"));
 
             var seenNodes = new HashSet<(int col, int row)>();
             var seenEdges = new HashSet<(int fromCol, int fromRow, int toCol, int toRow)>();
@@ -583,6 +756,843 @@ public sealed class MemoryReader : IDisposable
         {
             // map is best-effort
         }
+    }
+
+    private void ReadEvent(GameState result, ClrObject runManager, ClrObject state)
+    {
+        try
+        {
+            List<ClrObject> rooms = ReadList(ReadObj(state, "_currentRooms"));
+            if (rooms.Count == 0)
+            {
+                return;
+            }
+
+            ClrObject room = rooms[^1];
+            if (!string.Equals(room.Type?.Name.Split('.').Last(), "EventRoom", StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            result.InEvent = true;
+            ClrObject canonical = ReadObj(room, "<CanonicalEvent>k__BackingField");
+            ClrObject synchronizer = ReadObj(runManager, "<EventSynchronizer>k__BackingField");
+            List<ClrObject> events = ReadList(ReadObj(synchronizer, "_events"));
+            ClrObject local = events.Count > 0 ? events[0] : canonical;
+            string id = Entry(local) ?? Entry(canonical) ?? "";
+            result.EventId = id;
+            result.EventTitle = string.IsNullOrEmpty(id) ? "" : Localize("events", id, ".title");
+            result.EventIsAncient = local.Type?.Name.Contains("AncientEventModel", StringComparison.Ordinal) == true;
+
+            Dictionary<string, decimal> eventVars = ReadVars(local);
+            foreach ((string name, decimal value) in eventVars)
+            {
+                result.EventVars[name] = (double)value;
+            }
+
+            string description = LocStringText(ReadObj(local, "<Description>k__BackingField"), eventVars);
+            if (string.IsNullOrWhiteSpace(description) && !string.IsNullOrEmpty(id))
+            {
+                description = Localize("events", id, ".pages.INITIAL.description");
+            }
+            result.EventDescription = description;
+
+            List<ClrObject> options = ReadList(ReadObj(local, "_currentOptions"));
+            if (options.Count == 0)
+            {
+                options = ReadList(ReadObj(local, "_generatedOptions"));
+            }
+
+            int index = 0;
+            foreach (ClrObject option in options)
+            {
+                if (option.IsNull)
+                {
+                    continue;
+                }
+
+                ClrObject relic = ReadObj(option, "<Relic>k__BackingField");
+                string relicId = Entry(relic) ?? "";
+                ClrObject descriptionLoc = ReadObj(option, "<Description>k__BackingField");
+                string title = LocStringText(ReadObj(option, "<Title>k__BackingField"), eventVars);
+                string optionDescription = LocStringText(descriptionLoc, eventVars);
+                int relicRarity = Math.Max(0, ReadInt(relic, "<Rarity>k__BackingField"));
+
+                if (string.IsNullOrWhiteSpace(title) && !string.IsNullOrEmpty(relicId))
+                {
+                    title = Localize("relics", relicId, ".title");
+                }
+
+                string relicName = string.IsNullOrEmpty(relicId) ? "" : Localize("relics", relicId, ".title");
+                if (string.IsNullOrEmpty(relicName))
+                {
+                    relicName = LocVariableTextByName(descriptionLoc, "Relic");
+                }
+
+                result.EventOptions.Add(new EventOptionInfo
+                {
+                    Index = index++,
+                    TextKey = ReadStr(option, "<TextKey>k__BackingField"),
+                    Title = title,
+                    Description = optionDescription,
+                    Locked = ReadBool(option, "<IsLocked>k__BackingField"),
+                    Proceed = ReadBool(option, "<IsProceed>k__BackingField"),
+                    RelicId = string.IsNullOrEmpty(relicId) ? null : relicId,
+                    RelicName = string.IsNullOrEmpty(relicName) ? null : relicName,
+                    RelicRarity = relicRarity
+                });
+            }
+        }
+        catch
+        {
+            // event is best-effort
+        }
+    }
+
+    private string LocStringText(ClrObject locString, IReadOnlyDictionary<string, decimal>? extraVars = null)
+    {
+        if (locString.IsNull)
+        {
+            return "";
+        }
+
+        string table = ReadStr(locString, "<locTable>P") ?? "";
+        string key = ReadStr(locString, "<locEntryKey>P") ?? "";
+        if (string.IsNullOrEmpty(key))
+        {
+            return "";
+        }
+
+        if (_loc.TryGetValue(table, out Dictionary<string, string>? dict))
+        {
+            if (dict.TryGetValue(key, out string? text) && !string.IsNullOrWhiteSpace(text))
+            {
+                return CleanLocText(FormatLocVariables(text, locString, extraVars));
+            }
+
+            if (dict.TryGetValue(key.ToUpperInvariant(), out text) && !string.IsNullOrWhiteSpace(text))
+            {
+                return CleanLocText(FormatLocVariables(text, locString, extraVars));
+            }
+        }
+
+        return Prettify(key);
+    }
+
+    private string FormatLocVariables(string text, ClrObject locString, IReadOnlyDictionary<string, decimal>? extraVars = null)
+    {
+        foreach ((ClrObject key, ClrObject value) in ReadDict(ReadObj(locString, "_variables")))
+        {
+            string? name = key.AsString(64);
+            if (string.IsNullOrEmpty(name))
+            {
+                continue;
+            }
+
+            string replacement = LocVariableText(value);
+            if (!string.IsNullOrEmpty(replacement))
+            {
+                text = text.Replace("{" + name + "}", replacement);
+            }
+        }
+
+        if (extraVars != null)
+        {
+            foreach ((string name, decimal value) in extraVars)
+            {
+                text = Regex.Replace(
+                    text,
+                    "\\{" + Regex.Escape(name) + "(?::[^}]*)?\\}",
+                    value.ToString("0.##"));
+            }
+        }
+
+        return text;
+    }
+
+    private string LocVariableText(ClrObject value)
+    {
+        if (value.IsNull)
+        {
+            return "";
+        }
+
+        string type = value.Type?.Name ?? "";
+        try
+        {
+            if (type.Contains("LocString", StringComparison.Ordinal))
+            {
+                return LocStringText(value);
+            }
+
+            if (type == "System.String")
+            {
+                return value.AsString(512) ?? "";
+            }
+
+            if (value.IsBoxedValue)
+            {
+                if (type == "System.Decimal")
+                {
+                    return value.ReadBoxedValue<decimal>().ToString("0.##");
+                }
+
+                if (type == "System.Int32")
+                {
+                    return value.ReadBoxedValue<int>().ToString();
+                }
+
+                if (type == "System.Int64")
+                {
+                    return value.ReadBoxedValue<long>().ToString();
+                }
+
+                if (type == "System.Double")
+                {
+                    return value.ReadBoxedValue<double>().ToString("0.##");
+                }
+
+                if (type == "System.Boolean")
+                {
+                    return value.ReadBoxedValue<bool>() ? "是" : "否";
+                }
+            }
+
+            if (type.Contains("RelicModel", StringComparison.Ordinal))
+            {
+                string id = Entry(value) ?? "";
+                return string.IsNullOrEmpty(id) ? "" : Localize("relics", id, ".title");
+            }
+        }
+        catch
+        {
+            // Best-effort: leave the placeholder for CleanLocText to remove.
+        }
+
+        return "";
+    }
+
+    private string LocVariableTextByName(ClrObject locString, string name)
+    {
+        foreach ((ClrObject key, ClrObject value) in ReadDict(ReadObj(locString, "_variables")))
+        {
+            if (string.Equals(key.AsString(64), name, StringComparison.Ordinal))
+            {
+                return LocVariableText(value);
+            }
+        }
+
+        return "";
+    }
+
+    private static string CleanLocText(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return "";
+        }
+
+        // Event text uses BBCode-like tags and SmartFormat placeholders. We
+        // cannot call the game's formatter, so strip tags and keep readable
+        // labels for the common placeholders.
+        text = text.Replace("{Relic}", "遗物")
+                   .Replace("{Gold}", "?")
+                   .Replace("{HpLoss}", "?");
+        text = Regex.Replace(text, @"\[/?[a-zA-Z0-9_=#.\-]+\]", "");
+        text = Regex.Replace(text, @"\{[^}]+\}", "");
+        return text.Trim();
+    }
+
+    private void ReadShop(GameState result, ClrObject runManager, ClrObject state)
+    {
+        try
+        {
+            List<ClrObject> rooms = ReadList(ReadObj(state, "_currentRooms"));
+            if (rooms.Count == 0 || !string.Equals(rooms[^1].Type?.Name.Split('.').Last(), "MerchantRoom", StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            result.InShop = true;
+            List<ClrObject> inventories = ReadList(ReadObj(rooms[^1], "<Inventories>k__BackingField"));
+            if (inventories.Count == 0)
+            {
+                return;
+            }
+
+            ClrObject inventory = inventories[0];
+            int index = 0;
+
+            void AddCard(ClrObject entry, string kind)
+            {
+                ClrObject creation = ReadObj(entry, "<CreationResult>k__BackingField");
+                if (creation.IsNull)
+                {
+                    return;
+                }
+
+                ClrObject card = ReadObj(creation, "_modifiedCard");
+                if (card.IsNull)
+                {
+                    card = ReadObj(creation, "originalCard");
+                }
+
+                if (card.IsNull)
+                {
+                    return;
+                }
+
+                CardInfo info = BuildCard(card, 0);
+                int cost = Math.Max(0, ReadIntInherited(entry, "_cost"));
+                result.ShopItems.Add(new ShopItemInfo
+                {
+                    Index = index++,
+                    Kind = kind,
+                    Name = info.Name + (info.Upgraded > 0 ? "+" : ""),
+                    Description = CleanLocText(Localize("cards", info.Id, ".description")),
+                    Cost = cost,
+                    Affordable = cost <= result.Gold,
+                    Card = info
+                });
+            }
+
+            foreach (ClrObject entry in ReadList(ReadObj(inventory, "_characterCardEntries")))
+            {
+                AddCard(entry, "card");
+            }
+
+            foreach (ClrObject entry in ReadList(ReadObj(inventory, "_colorlessCardEntries")))
+            {
+                AddCard(entry, "colorless");
+            }
+
+            foreach (ClrObject entry in ReadList(ReadObj(inventory, "_relicEntries")))
+            {
+                ClrObject relic = ReadObj(entry, "<Model>k__BackingField");
+                if (relic.IsNull)
+                {
+                    continue;
+                }
+
+                string id = Entry(relic) ?? "";
+                int cost = Math.Max(0, ReadIntInherited(entry, "_cost"));
+                result.ShopItems.Add(new ShopItemInfo
+                {
+                    Index = index++,
+                    Kind = "relic",
+                    Name = Localize("relics", id, ".title"),
+                    Description = CleanLocText(Localize("relics", id, ".description")),
+                    Cost = cost,
+                    Affordable = cost <= result.Gold,
+                    RelicId = id,
+                    RelicName = Localize("relics", id, ".title")
+                });
+            }
+
+            foreach (ClrObject entry in ReadList(ReadObj(inventory, "_potionEntries")))
+            {
+                ClrObject potion = ReadObj(entry, "<Model>k__BackingField");
+                if (potion.IsNull)
+                {
+                    continue;
+                }
+
+                string id = Entry(potion) ?? "";
+                int cost = Math.Max(0, ReadIntInherited(entry, "_cost"));
+                result.ShopItems.Add(new ShopItemInfo
+                {
+                    Index = index++,
+                    Kind = "potion",
+                    Name = Localize("potions", id, ".title"),
+                    Description = CleanLocText(Localize("potions", id, ".description")),
+                    Cost = cost,
+                    Affordable = cost <= result.Gold,
+                    PotionId = id
+                });
+            }
+
+            ClrObject removal = ReadObj(inventory, "<CardRemovalEntry>k__BackingField");
+            if (!removal.IsNull && !ReadBool(removal, "<Used>k__BackingField"))
+            {
+                int cost = Math.Max(0, ReadIntInherited(removal, "_cost"));
+                result.ShopItems.Add(new ShopItemInfo
+                {
+                    Index = index,
+                    Kind = "removal",
+                    Name = "删牌服务",
+                    Description = "删除牌组中的一张牌",
+                    Cost = cost,
+                    Affordable = cost <= result.Gold
+                });
+            }
+        }
+        catch
+        {
+            // shop is best-effort
+        }
+    }
+
+    private void ReadRestSite(GameState result, ClrObject runManager, ClrObject state)
+    {
+        try
+        {
+            List<ClrObject> rooms = ReadList(ReadObj(state, "_currentRooms"));
+            if (rooms.Count == 0 || !string.Equals(rooms[^1].Type?.Name.Split('.').Last(), "RestSiteRoom", StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            result.InRestSite = true;
+            ClrObject synchronizer = ReadObj(runManager, "<RestSiteSynchronizer>k__BackingField");
+            List<ClrObject> restSites = ReadList(ReadObj(synchronizer, "_restSites"));
+            if (restSites.Count == 0)
+            {
+                return;
+            }
+
+            List<ClrObject> options = ReadList(ReadObj(restSites[0], "options"));
+            int index = 0;
+            foreach (ClrObject option in options)
+            {
+                if (option.IsNull)
+                {
+                    continue;
+                }
+
+                string type = option.Type?.Name.Split('.').Last() ?? "";
+                string optionId = type.Replace("RestSiteOption", "").ToUpperInvariant();
+                if (string.IsNullOrEmpty(optionId))
+                {
+                    optionId = type.ToUpperInvariant();
+                }
+
+                string title = Localize("rest_site_ui", "OPTION_" + optionId, ".name");
+                string description = Localize("rest_site_ui", "OPTION_" + optionId, ".description");
+                bool smithEnabled = type != "SmithRestSiteOption" ||
+                                    result.DeckCards.Any(card => card.Upgraded == 0 && card.Type != 4 && card.Type != 5);
+                int heal = optionId == "HEAL" ? (int)(result.MaxHp * 0.3) : 0;
+
+                result.RestOptions.Add(new RestOptionInfo
+                {
+                    Index = index++,
+                    OptionId = optionId,
+                    Title = title,
+                    Description = CleanLocText(description),
+                    Enabled = type == "SmithRestSiteOption" ? smithEnabled : true,
+                    HealAmount = heal
+                });
+            }
+        }
+        catch
+        {
+            // rest site is best-effort
+        }
+    }
+
+    private void ReadTreasure(GameState result, ClrObject runManager, ClrObject state)
+    {
+        try
+        {
+            List<ClrObject> rooms = ReadList(ReadObj(state, "_currentRooms"));
+            if (rooms.Count == 0 || !string.Equals(rooms[^1].Type?.Name.Split('.').Last(), "TreasureRoom", StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            result.InTreasure = true;
+            ClrObject synchronizer = ReadObj(runManager, "<TreasureRoomRelicSynchronizer>k__BackingField");
+            List<ClrObject> relics = ReadList(ReadObj(synchronizer, "_currentRelics"));
+            int index = 0;
+            foreach (ClrObject relic in relics)
+            {
+                if (relic.IsNull)
+                {
+                    continue;
+                }
+
+                string id = Entry(relic) ?? "";
+                result.RelicChoices.Add(new RelicChoiceInfo
+                {
+                    Index = index++,
+                    Id = id,
+                    Name = Localize("relics", id, ".title"),
+                    Description = CleanLocText(Localize("relics", id, ".description")),
+                    Rarity = Math.Max(0, ReadInt(relic, "<Rarity>k__BackingField"))
+                });
+            }
+        }
+        catch
+        {
+            // treasure is best-effort
+        }
+    }
+
+    private void ReadCombatEvents(GameState result)
+    {
+        if (_combatInstanceField == null || _domain == null)
+        {
+            _historyAvailable = false;
+            return;
+        }
+
+        try
+        {
+            ClrObject manager = _combatInstanceField.ReadObject(_domain);
+            ClrObject history = ReadObj(manager, "<History>k__BackingField");
+            _historyAvailable = !manager.IsNull && !history.IsNull;
+            if (!_historyAvailable)
+            {
+                return;
+            }
+
+            if (!TryReadList(ReadObj(history, "_entries"), out List<ClrObject> entries))
+            {
+                // A transient read failure must not look like a cleared list,
+                // otherwise the next poll replays every entry as a new event.
+                return;
+            }
+
+            if (entries.Count == 0)
+            {
+                // CombatHistory.Clear() empties the list only at combat start/end.
+                // Require two consecutive empty reads so one bad snapshot cannot
+                // rewind the cursor and duplicate card_play events.
+                _historyEmptyPolls++;
+                if (_historySeen == 0 || _historyEmptyPolls >= 2)
+                {
+                    _historySeen = 0;
+                    _historyShortPolls = 0;
+                    _historyInitialized = true;
+                    _historyEmitted.Clear();
+                }
+
+                return;
+            }
+
+            _historyEmptyPolls = 0;
+            if (!_historyInitialized)
+            {
+                // App started mid-combat: skip history that happened before attach.
+                // Mark those entries as already seen so a later cursor rewind
+                // cannot emit pre-attach plays as new events.
+                foreach (ClrObject entry in entries)
+                {
+                    if (entry.Address != 0)
+                    {
+                        _historyEmitted.Add(entry.Address);
+                    }
+                }
+
+                _historyInitialized = true;
+                _historySeen = entries.Count;
+                return;
+            }
+
+            if (entries.Count < _historySeen)
+            {
+                // Shorter snapshot: usually the game is mutating the List. Do not
+                // rewind immediately; after two shorter polls treat it as a new
+                // combat whose history does not start with an observed empty list.
+                _historyShortPolls++;
+                if (_historyShortPolls < 2)
+                {
+                    return;
+                }
+
+                _historySeen = 0;
+                _historyShortPolls = 0;
+                _historyEmitted.Clear();
+            }
+            else
+            {
+                _historyShortPolls = 0;
+            }
+
+            // Do not compare entry[0].Address here: the GC can move objects and
+            // the address would look like a new history, replaying every entry.
+            for (; _historySeen < entries.Count; _historySeen++)
+            {
+                ulong address = entries[_historySeen].Address;
+                if (address == 0)
+                {
+                    continue;
+                }
+
+                if (!_historyEmitted.Add(address))
+                {
+                    // The cursor can be rewound by a mutable-list snapshot; the
+                    // entry object itself is unique, so never emit it twice.
+                    HistoryDuplicatesSkipped++;
+                    continue;
+                }
+
+                try
+                {
+                    CombatEventInfo? ev = ParseCombatEvent(entries[_historySeen]);
+                    if (ev != null)
+                    {
+                        result.CombatEvents.Add(ev);
+                    }
+                }
+                catch
+                {
+                    // Skip a malformed entry and keep later events flowing.
+                }
+            }
+        }
+        catch
+        {
+            _historyAvailable = false;
+            // history is best-effort; inferred actions remain the fallback
+        }
+    }
+
+    /// <summary>
+    /// Read List&lt;T&gt; with an explicit success flag. ReadList swallows errors and
+    /// returns an empty list, which is indistinguishable from a genuine empty list.
+    /// </summary>
+    private static bool TryReadList(ClrObject obj, out List<ClrObject> result)
+    {
+        result = new List<ClrObject>();
+        if (obj.IsNull)
+        {
+            return false;
+        }
+
+        try
+        {
+            if (obj.Type?.IsArray == true)
+            {
+                ClrArray array = obj.AsArray();
+                for (int i = 0; i < array.Length; i++)
+                {
+                    result.Add(array.GetObjectValue(i));
+                }
+
+                return true;
+            }
+
+            ClrObject items = obj.ReadObjectField("_items");
+            if (items.IsNull)
+            {
+                return false;
+            }
+
+            ClrArray itemsArray = items.AsArray();
+            int size = obj.ReadField<int>("_size");
+            if (size < 0 || size > itemsArray.Length)
+            {
+                // The game is mutating the list while we read it.
+                return false;
+            }
+
+            for (int i = 0; i < size; i++)
+            {
+                result.Add(itemsArray.GetObjectValue(i));
+            }
+
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private CombatEventInfo? ParseCombatEvent(ClrObject entry)
+    {
+        string type = entry.Type?.Name.Split('.').Last() ?? "";
+        if (type == "CardPlayFinishedEntry")
+        {
+            ClrObject play = ReadObj(entry, "<CardPlay>k__BackingField");
+            ClrObject card = ReadObj(play, "<Card>k__BackingField");
+            string id = Entry(card) ?? "";
+            if (string.IsNullOrEmpty(id))
+            {
+                return null;
+            }
+
+            var ev = new CombatEventInfo
+            {
+                Kind = "card_play",
+                Id = id,
+                Name = Localize("cards", id, ".title"),
+                PlayIndex = Math.Max(0, ReadInt(play, "<PlayIndex>k__BackingField")),
+                PlayCount = Math.Max(1, ReadInt(play, "<PlayCount>k__BackingField")),
+                AutoPlay = ReadBool(play, "<IsAutoPlay>k__BackingField")
+            };
+
+            ClrObject target = ReadObj(play, "<Target>k__BackingField");
+            if (!target.IsNull)
+            {
+                ev.Target = CreatureName(target);
+                ev.TargetHp = ReadInt(target, "_currentHp");
+                ev.TargetMaxHp = ReadInt(target, "_maxHp");
+            }
+
+            ClrValueType resources = play.ReadValueTypeField("<Resources>k__BackingField");
+            ev.EnergySpent = resources.ReadField<int>("<EnergySpent>k__BackingField");
+            ev.StarsSpent = resources.ReadField<int>("<StarsSpent>k__BackingField");
+            return ev;
+        }
+
+        if (type == "PotionUsedEntry")
+        {
+            ClrObject potion = ReadObj(entry, "<Potion>k__BackingField");
+            string id = Entry(potion) ?? "";
+            if (string.IsNullOrEmpty(id))
+            {
+                return null;
+            }
+
+            var ev = new CombatEventInfo
+            {
+                Kind = "potion_use",
+                Id = id,
+                Name = Localize("potions", id, ".title")
+            };
+            ClrObject target = ReadObj(entry, "<Target>k__BackingField");
+            if (!target.IsNull)
+            {
+                ev.Target = CreatureName(target);
+                ev.TargetHp = ReadInt(target, "_currentHp");
+                ev.TargetMaxHp = ReadInt(target, "_maxHp");
+            }
+
+            return ev;
+        }
+
+        if (type == "CardDrawnEntry")
+        {
+            ClrObject card = ReadObj(entry, "<Card>k__BackingField");
+            string id = Entry(card) ?? "";
+            if (string.IsNullOrEmpty(id))
+            {
+                return null;
+            }
+
+            return new CombatEventInfo
+            {
+                Kind = "card_drawn",
+                Id = id,
+                Name = Localize("cards", id, ".title"),
+                Receiver = CreatureLabel(ReadObj(entry, "<Actor>k__BackingField")),
+                FromHandDraw = ReadBool(entry, "<FromHandDraw>k__BackingField")
+            };
+        }
+
+        if (type == "BlockGainedEntry")
+        {
+            ClrObject cardPlay = ReadObj(entry, "<CardPlay>k__BackingField");
+            string source = "relic/other";
+            if (!cardPlay.IsNull)
+            {
+                string cardName = CardLabel(ReadObj(cardPlay, "<Card>k__BackingField"));
+                if (!string.IsNullOrEmpty(cardName))
+                {
+                    source = cardName;
+                }
+            }
+
+            return new CombatEventInfo
+            {
+                Kind = "block_gained",
+                Amount = Math.Max(0, ReadInt(entry, "<Amount>k__BackingField")),
+                Source = source,
+                Receiver = CreatureLabel(ReadObj(entry, "<Actor>k__BackingField"))
+            };
+        }
+
+        if (type == "DamageReceivedEntry")
+        {
+            ClrObject result = ReadObj(entry, "<Result>k__BackingField");
+            int blocked = Math.Max(0, ReadInt(result, "<BlockedDamage>k__BackingField"));
+            int unblocked = Math.Max(0, ReadInt(result, "<UnblockedDamage>k__BackingField"));
+            int overkill = Math.Max(0, ReadInt(result, "<OverkillDamage>k__BackingField"));
+            ClrObject cardSource = ReadObj(entry, "<CardSource>k__BackingField");
+            ClrObject dealer = ReadObj(entry, "<Dealer>k__BackingField");
+            string source = !cardSource.IsNull
+                ? CardLabel(cardSource)
+                : (!dealer.IsNull ? CreatureLabel(dealer) : "环境");
+
+            return new CombatEventInfo
+            {
+                Kind = "damage_received",
+                Amount = blocked + unblocked,
+                Blocked = blocked,
+                Unblocked = unblocked,
+                Overkill = overkill,
+                Source = source,
+                Receiver = CreatureLabel(ReadObj(entry, "<Actor>k__BackingField")),
+                Dealer = dealer.IsNull ? null : CreatureLabel(dealer)
+            };
+        }
+
+        if (type == "PowerReceivedEntry")
+        {
+            ClrObject power = ReadObj(entry, "<Power>k__BackingField");
+            string id = Entry(power) ?? "";
+            if (string.IsNullOrEmpty(id))
+            {
+                return null;
+            }
+
+            ClrObject applier = ReadObj(entry, "<Applier>k__BackingField");
+            return new CombatEventInfo
+            {
+                Kind = "power_received",
+                Id = id,
+                Name = Localize("powers", id, ".title"),
+                Amount = ReadDecimal(entry, "<Amount>k__BackingField"),
+                Source = applier.IsNull ? null : CreatureLabel(applier),
+                Receiver = CreatureLabel(ReadObj(entry, "<Actor>k__BackingField"))
+            };
+        }
+
+        return null;
+    }
+
+    private string CardLabel(ClrObject card)
+    {
+        string id = Entry(card) ?? "";
+        return string.IsNullOrEmpty(id) ? "" : Localize("cards", id, ".title");
+    }
+
+    private string CreatureLabel(ClrObject creature)
+    {
+        if (creature.IsNull)
+        {
+            return "";
+        }
+
+        ClrObject monster = ReadObj(creature, "<Monster>k__BackingField");
+        if (!monster.IsNull)
+        {
+            string id = Entry(monster) ?? "";
+            return Localize("monsters", id, ".name");
+        }
+
+        ClrObject player = ReadObj(creature, "<Player>k__BackingField");
+        if (!player.IsNull)
+        {
+            ClrObject character = ReadObj(player, "<Character>k__BackingField");
+            string id = Entry(character) ?? "";
+            return string.IsNullOrEmpty(id) ? "玩家" : Localize("characters", id, ".title");
+        }
+
+        return CreatureName(creature);
+    }
+
+    private string CreatureName(ClrObject creature)
+    {
+        ClrObject monster = ReadObj(creature, "<Monster>k__BackingField");
+        if (!monster.IsNull)
+        {
+            string id = Entry(monster) ?? "";
+            return Localize("monsters", id, ".name");
+        }
+
+        return creature.Type?.Name.Split('.').Last() ?? "?";
     }
 
     private static (int col, int row) ReadCoord(ClrObject point)
@@ -848,7 +1858,7 @@ public sealed class MemoryReader : IDisposable
 
             ClrObject manager = instance.ReadObject(_domain);
             ClrObject tables = ReadObj(manager, "_tables");
-            string[] wanted = { "cards", "relics", "potions", "monsters", "characters" };
+            string[] wanted = { "cards", "relics", "potions", "monsters", "characters", "events", "powers", "rest_site_ui" };
 
             foreach ((ClrObject key, ClrObject value) in ReadDict(tables))
             {
@@ -1075,6 +2085,59 @@ public sealed class MemoryReader : IDisposable
                 return -1;
             }
         }
+    }
+
+    private static long ReadLong(ClrObject obj, string field)
+    {
+        if (obj.IsNull)
+        {
+            return 0;
+        }
+
+        try
+        {
+            return obj.ReadField<long>(field);
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    private static int ReadIntInherited(ClrObject obj, string field)
+    {
+        if (obj.IsNull)
+        {
+            return -1;
+        }
+
+        for (ClrType? type = obj.Type; type != null; type = type.BaseType)
+        {
+            ClrInstanceField? instanceField = type.GetFieldByName(field);
+            if (instanceField == null)
+            {
+                continue;
+            }
+
+            try
+            {
+                return obj.ReadField<int>(instanceField);
+            }
+            catch
+            {
+                try
+                {
+                    ClrValueType value = obj.ReadValueTypeField(instanceField);
+                    return value.ReadField<int>("value__");
+                }
+                catch
+                {
+                    return -1;
+                }
+            }
+        }
+
+        return -1;
     }
 
     private static string? Entry(ClrObject model)

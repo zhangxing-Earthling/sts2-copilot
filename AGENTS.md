@@ -9,5 +9,7 @@
 - 规则与数学在 `py/rules/engine.py`；C# `Advisor.cs` 只是回退。
 - 不提交 API key、游戏资源、反编译代码、`dist/`。
 - 发布后必须检查 `exit code` 与 `dist` 里 DLL 的修改时间。
+- 不要自动 `git push`；只有用户明确要求时才推送。
+- 发布时 `py/rules/*.py` 会随 csproj 复制到 `dist/Sts2Copilot/rules/`；一键入口是 `start.cmd`。
 
 常用入口：`README.md`、`docs/ARCHITECTURE.md`、`docs/STATE_SCHEMA.md`、`docs/RULES.md`。

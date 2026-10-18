@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from combat import solve
 
+import catalog as model_catalog
+
 TYPE_NAMES = {
     0: "未定",
     1: "未知",
@@ -21,6 +23,42 @@ TYPE_NAMES = {
 }
 
 RARITY_SCORE = {4: 3.0, 5: 3.5, 3: 2.0, 2: 1.2, 1: 0.5}
+RELIC_RARITY_SCORE = {
+    "Common": 1.2, "Uncommon": 2.0, "Rare": 3.0,
+    "Ancient": 4.0, "Event": 2.5, "Shop": 2.0,
+}
+POTION_RARITY_SCORE = {"Common": 1.0, "Uncommon": 1.5, "Rare": 2.2, "Event": 2.0}
+
+
+def score_potion(value) -> float:
+    entity = model_catalog.potion(value)
+    if not entity:
+        return 1.2
+    score = POTION_RARITY_SCORE.get(str(entity.get("rarity") or ""), 1.2)
+    kinds = {e.get("kind") for e in entity.get("effects") or []}
+    powers = {e.get("power") for e in entity.get("effects") or []}
+    if kinds & {"heal", "block", "power"}:
+        score += 0.2
+    if "damage" in kinds:
+        score += 0.4
+    if "draw" in kinds or "energy" in kinds:
+        score += 0.15
+    if powers & {"IntangiblePower", "ShrinkPower", "PlatingPower", "BufferPower"}:
+        score += 0.5
+    if "automatic" in str(entity.get("usage") or "").lower():
+        score += 1.5
+    return score
+
+
+def score_relic(value) -> float:
+    entity = model_catalog.relic(value)
+    if not entity:
+        return 2.0
+    score = RELIC_RARITY_SCORE.get(str(entity.get("rarity") or ""), 2.0)
+    score += min(1.0, 0.15 * len(entity.get("hooks") or []))
+    if entity.get("model", {}).get("level") == "exact":
+        score += 0.3
+    return score
 
 
 def _advice(rule_id: str, text: str, severity: str = "info") -> dict:
@@ -49,7 +87,10 @@ def _knapsack(cards, energy, value):
 
 
 def _names(cards) -> str:
-    return "、".join(c.get("Name", "?") for c in cards) or "（无）"
+    return "、".join(
+        _upgrade_mark(str(c.get("Name", "?")), int(c.get("Upgraded") or 0))
+        for c in cards
+    ) or "（无）"
 
 
 def _deck(state):
@@ -80,35 +121,60 @@ def score_card(state, card) -> float:
         score -= 1.0
     if card.get("Cost", 0) == 0:
         score += 0.3
+
+    entity = model_catalog.card(card)
+    if entity:
+        tags = set(entity.get("tags") or [])
+        keywords = set(entity.get("keywords") or [])
+        kinds = {item.get("kind") for item in entity.get("effects") or []}
+        if "draw" in kinds:
+            score += 0.4
+        if "energy" in kinds or "stars" in kinds:
+            score += 0.4
+        if "generated" in kinds or "transform" in kinds:
+            score -= 0.3
+        if "Exhaust" in keywords:
+            score -= 0.2
+        if "Ethereal" in keywords:
+            score -= 0.2
+        if "Retain" in keywords or "Innate" in keywords:
+            score += 0.2
+        if "Strike" in tags and card.get("Damage", 0) > 0:
+            score += 0.1
+        if entity.get("model", {}).get("level") == "partial":
+            # Catalog-known but not exactly simulable: do not penalize the card,
+            # just avoid over-ranking it like a fully modeled one.
+            score -= 0.1
     return score
 
 
 def _reward(state):
     choices = state.get("CardChoices") or []
     ranked = sorted(((score_card(state, c), c) for c in choices), key=lambda x: -x[0])
-    if not ranked:
-        return []
+    advice = []
+    if ranked:
+        advice.append(_advice("reward.recommend", f"推荐：{ranked[0][1].get('Name', '?')}（评分 {ranked[0][0]:.1f}）", "good"))
+        lines = []
+        if state.get("RewardGold", 0) > 0:
+            lines.append(f"金币 +{state['RewardGold']}")
+        for score, card in ranked:
+            cost = "X" if card.get("CostsX") else card.get("Cost", 0)
+            effect = []
+            if card.get("Damage", 0) > 0:
+                hit = f"×{card['Hits']}" if card.get("Hits", 1) > 1 else ""
+                effect.append(f"{card['Damage']}{hit}伤")
+            if card.get("Block", 0) > 0:
+                effect.append(f"{card['Block']}挡")
+            if card.get("Poison", 0) > 0:
+                effect.append(f"{card['Poison']}毒")
+            suffix = ("  " + " ".join(effect)) if effect else ""
+            card_name = _upgrade_mark(str(card.get("Name", "?")), int(card.get("Upgraded") or 0))
+            lines.append(f"{card_name}（{cost}费）{suffix}  评分 {score:.1f}")
 
-    advice = [_advice("reward.recommend", f"推荐：{ranked[0][1].get('Name', '?')}（评分 {ranked[0][0]:.1f}）", "good")]
-    lines = []
-    if state.get("RewardGold", 0) > 0:
-        lines.append(f"金币 +{state['RewardGold']}")
-    for score, card in ranked:
-        cost = "X" if card.get("CostsX") else card.get("Cost", 0)
-        effect = []
-        if card.get("Damage", 0) > 0:
-            hit = f"×{card['Hits']}" if card.get("Hits", 1) > 1 else ""
-            effect.append(f"{card['Damage']}{hit}伤")
-        if card.get("Block", 0) > 0:
-            effect.append(f"{card['Block']}挡")
-        if card.get("Poison", 0) > 0:
-            effect.append(f"{card['Poison']}毒")
-        suffix = ("  " + " ".join(effect)) if effect else ""
-        lines.append(f"{card.get('Name', '?')}（{cost}费）{suffix}  评分 {score:.1f}")
-
-    advice.append(_advice("reward.card_choice", "三选一：\n" + "\n".join(lines), "good"))
-    if len(ranked) >= 2 and ranked[0][0] - ranked[1][0] < 0.5:
-        advice.append(_advice("reward.close_call", "前两名差距很小，按流派偏好选即可。", "info"))
+        advice.append(_advice("reward.card_choice", "三选一：\n" + "\n".join(lines), "good"))
+        if len(ranked) >= 2 and ranked[0][0] - ranked[1][0] < 0.5:
+            advice.append(_advice("reward.close_call", "前两名差距很小，按流派偏好选即可。", "info"))
+    advice.extend(_potion_reward(state))
     return advice
 
 
@@ -185,21 +251,65 @@ def _risk_penalty(hp, max_hp):
     return 0.0
 
 
-def _map_dp(state):
-    """Full DAG DP from the current node to the boss.
+def _map_ascension(state) -> int:
+    try:
+        return max(0, int(state.get("Ascension") or 0))
+    except (TypeError, ValueError):
+        return 0
 
-    State = (node, hp); value = node rewards + child value - low-hp risk.
-    Returns None when the full graph is unavailable.
+
+def _boss_threshold(act: int, ascension: int) -> float:
+    """HP ratio we want when entering the boss.
+
+    A10 is the acceptance target, so at A10 the margin is deliberately higher.
+    """
+    return min(0.80, 0.55 + 0.05 * max(0, act - 1) + (0.15 if ascension >= 10 else 0.0))
+
+
+def _boss_penalty(hp: int, max_hp: int, act: int, ascension: int) -> float:
+    threshold = _boss_threshold(act, ascension)
+    ratio = hp / max(1, max_hp)
+    return max(0.0, threshold - ratio) * 40.0
+
+
+def _path_penalty(node_type: int, last_type: int, elite_count: int,
+                  hp_after: int, max_hp: int) -> float:
+    """Order-sensitive risk: elite stacking, rest timing, low-HP elites."""
+    penalty = 0.0
+    if node_type == 6:  # Elite
+        if elite_count > 0:
+            penalty -= 2.0 * elite_count
+        if last_type == 6:
+            penalty -= 3.0
+        if last_type == 4:
+            penalty += 0.5
+        if hp_after < int(max_hp * 0.4):
+            penalty -= 1.0
+    elif node_type == 4 and last_type == 6:
+        penalty += 0.8  # heal immediately after an elite
+    return penalty
+
+
+
+def _map_dp(state):
+    """Full DAG DP from the current node to the boss, with path-aware risk.
+
+    State = (node, hp, previous node type, elite count). The value includes
+    future nodes all the way to the boss, a low-HP risk penalty, elite
+    stacking/rest-timing penalties, and a boss-entry readiness penalty.
+    If the current node is not in the graph (act start / Ancient node), the
+    MapChoices are used as roots so the next-step score still includes the
+    whole future path.
     """
     nodes_list = state.get("MapNodes") or []
     edges = state.get("MapEdges") or []
-    if len(nodes_list) < 3 or not edges:
+    if not nodes_list:
         return None
 
     nodes = {(n.get("Col"), n.get("Row")): n for n in nodes_list}
     start = (state.get("MapCol"), state.get("MapRow"))
     boss = next((k for k, n in nodes.items() if n.get("Type") == 7), None)
-    if start not in nodes or boss is None:
+    if boss is None:
         return None
 
     adjacency = {}
@@ -208,30 +318,56 @@ def _map_dp(state):
         b = (edge.get("ToCol"), edge.get("ToRow"))
         adjacency.setdefault(a, []).append(b)
 
+    choices = [
+        (node.get("Col"), node.get("Row"))
+        for node in (state.get("MapChoices") or [])
+        if isinstance(node, dict)
+    ]
+    roots = list(adjacency.get(start, []))
+    if not roots:
+        roots = [node for node in choices if node in nodes]
+    if not roots:
+        return None
+
     max_hp = max(1, int(state.get("MaxHp", 1)))
     start_hp = max(1, int(state.get("Hp", 1)))
+    act = min(3, max(1, int(state.get("Act", 1))))
+    ascension = _map_ascension(state)
+    start_type = int((nodes.get(start) or {}).get("Type") or 0)
     memo = {}
 
-    def solve(node, hp):
-        key = (node, hp)
+    def solve(node, hp, last_type, elite_count, depth):
+        key = (node, hp, last_type, elite_count, depth)
         if key in memo:
             return memo[key]
 
         info = nodes.get(node)
         if info is None:
             return (-1e9, (), hp)
-        if info.get("Type") == 7:
-            return (0.0, (node,), hp)
+        node_type = int(info.get("Type") or 0)
+        if node_type == 7:
+            penalty = _boss_penalty(hp, max_hp, act, ascension)
+            result = (-penalty, (node,), hp)
+            memo[key] = result
+            return result
 
         loss = _node_loss(state, info)
-        heal = int(max_hp * 0.3) if info.get("Type") == 4 else 0
-        hp_after = min(max_hp, hp - loss + heal)
+        if ascension >= 10 and node_type in (5, 6):
+            loss = int(loss * 1.30 + 0.999)
+        missing = max(0, max_hp - hp)
+        heal = min(missing, int(max_hp * 0.3)) if node_type == 4 else 0
+        hp_after = max(0, min(max_hp, hp - loss + heal))
         if hp_after <= 0:
             return (-1e9, (), hp_after)
 
-        value = _node_reward(state, info) + _risk_penalty(hp_after, max_hp)
+        value = (
+            _node_reward(state, info)
+            + _risk_penalty(hp_after, max_hp)
+            + _path_penalty(node_type, last_type, elite_count, hp_after, max_hp)
+        )
+        next_elites = elite_count + (1 if node_type == 6 else 0)
         children = adjacency.get(node, [])
-        if not children:
+        if not children or depth <= 0:
             result = (value, (node,), hp_after)
             memo[key] = result
             return result
@@ -240,7 +376,9 @@ def _map_dp(state):
         best_path = ()
         best_hp = hp_after
         for child in children:
-            child_value, child_path, child_hp = solve(child, hp_after)
+            child_value, child_path, child_hp = solve(
+                child, hp_after, node_type, next_elites, depth - 1
+            )
             total = value + child_value
             if total > best_total:
                 best_total = total
@@ -252,11 +390,16 @@ def _map_dp(state):
         return result
 
     ranked = []
-    for child in adjacency.get(start, []):
-        value, path, hp_after = solve(child, start_hp)
+    for child in roots:
+        value, path, hp_after = solve(child, start_hp, start_type, 0, 64)
         ranked.append((value, child, path, hp_after))
 
     if not ranked:
+        return None
+
+    # If the graph is missing the Boss path, do not pretend the score covers
+    # the whole act; let _map_lookahead handle a bounded future instead.
+    if not any(path and path[-1] == boss for _, _, path, _ in ranked):
         return None
 
     ranked.sort(key=lambda item: -item[0])
@@ -267,18 +410,498 @@ def _map_dp(state):
             for k in path
         )
 
+    def stats(path):
+        counts = {}
+        for node in path:
+            counts[nodes[node].get("Type", 0)] = counts.get(nodes[node].get("Type", 0), 0) + 1
+        parts = []
+        for node_type, label in ((6, "精英"), (4, "营地"), (2, "商店"), (3, "宝箱")):
+            if counts.get(node_type):
+                parts.append(f"{label}×{counts[node_type]}")
+        return " ".join(parts) or "无额外节点"
+
     advice = []
     best_value, best_child, best_path, best_hp = ranked[0]
     advice.append(_advice(
         "map.recommend",
-        f"推荐路线：{fmt_path(best_path)}；预计结束 HP {best_hp}，评分 {best_value:.1f}",
+        f"推荐路线（到 Boss 综合）：{fmt_path(best_path)}；"
+        f"预计结束 HP {best_hp}/{max_hp}（{best_hp * 100 // max_hp}%），"
+        f"{stats(best_path)}，综合评分 {best_value:.1f}",
         "good"))
 
     lines = []
     for value, child, path, hp_after in ranked:
-        preview = fmt_path(path[:4])
-        lines.append(f"{TYPE_NAMES.get(nodes[child].get('Type', 0), '?')}（{child[0]},{child[1]}）  评分 {value:.1f}  HP→{hp_after}  {preview}")
-    advice.append(_advice("map.route", "第一层：\n" + "\n".join(lines), "info"))
+        preview = fmt_path(path[:6]) + ("…" if len(path) > 6 else "")
+        lines.append(
+            f"{TYPE_NAMES.get(nodes[child].get('Type', 0), '?')}"
+            f"（{child[0]},{child[1]}）  综合评分 {value:.1f}  "
+            f"HP→{hp_after}/{max_hp}  {stats(path)}  {preview}"
+        )
+    advice.append(_advice("map.route", "下一步（分数已包含之后到 Boss 的路径）：\n" + "\n".join(lines), "info"))
+    if len(ranked) >= 2 and ranked[0][0] - ranked[1][0] < 0.5:
+        first = ranked[0]
+        second = ranked[1]
+        safer, other = (first, second) if first[3] >= second[3] else (second, first)
+        advice.append(_advice(
+            "map.close_call",
+            f"前两名综合分差仅 {first[0] - second[0]:.1f}："
+            f"{TYPE_NAMES.get(nodes[first[1]].get('Type', 0), '?')} 预计 HP {first[3]}/{max_hp}；"
+            f"{TYPE_NAMES.get(nodes[second[1]].get('Type', 0), '?')} 预计 HP {second[3]}/{max_hp}。"
+            f"想稳 Boss 血线选 {TYPE_NAMES.get(nodes[safer[1]].get('Type', 0), '?')}，"
+            f"想多拿遗物/收益选 {TYPE_NAMES.get(nodes[other[1]].get('Type', 0), '?')}。",
+            "info",
+        ))
+    return advice
+
+
+
+def _map_lookahead(state, depth=6):
+    """Bounded future lookahead when the full graph/boss is unavailable."""
+    nodes_list = state.get("MapNodes") or []
+    edges = state.get("MapEdges") or []
+    if not nodes_list or not edges:
+        return None
+    nodes = {(n.get("Col"), n.get("Row")): n for n in nodes_list}
+    choices = [
+        (node.get("Col"), node.get("Row"))
+        for node in (state.get("MapChoices") or [])
+        if isinstance(node, dict) and (node.get("Col"), node.get("Row")) in nodes
+    ]
+    if not choices:
+        return None
+    adjacency = {}
+    for edge in edges:
+        adjacency.setdefault(
+            (edge.get("FromCol"), edge.get("FromRow")), []
+        ).append((edge.get("ToCol"), edge.get("ToRow")))
+    max_hp = max(1, int(state.get("MaxHp", 1)))
+    start_hp = max(1, int(state.get("Hp", 1)))
+    act = min(3, max(1, int(state.get("Act", 1))))
+    ascension = _map_ascension(state)
+    memo = {}
+
+    def solve(node, hp, last_type, elite_count, remaining):
+        key = (node, hp, last_type, elite_count, remaining)
+        if key in memo:
+            return memo[key]
+        info = nodes.get(node)
+        if info is None:
+            return (-1e9, (), hp)
+        node_type = int(info.get("Type") or 0)
+        if node_type == 7:
+            result = (-_boss_penalty(hp, max_hp, act, ascension), (node,), hp)
+            memo[key] = result
+            return result
+        loss = _node_loss(state, info)
+        if ascension >= 10 and node_type in (5, 6):
+            loss = int(loss * 1.30 + 0.999)
+        missing = max(0, max_hp - hp)
+        heal = min(missing, int(max_hp * 0.3)) if node_type == 4 else 0
+        hp_after = max(0, min(max_hp, hp - loss + heal))
+        if hp_after <= 0:
+            return (-1e9, (), hp_after)
+        value = (
+            _node_reward(state, info)
+            + _risk_penalty(hp_after, max_hp)
+            + _path_penalty(node_type, last_type, elite_count, hp_after, max_hp)
+        )
+        children = [child for child in adjacency.get(node, []) if child in nodes]
+        if remaining <= 1 or not children:
+            result = (value, (node,), hp_after)
+            memo[key] = result
+            return result
+        best = (-1e9, (), hp_after)
+        for child in children:
+            child_value, child_path, child_hp = solve(
+                child, hp_after, node_type,
+                elite_count + (1 if node_type == 6 else 0),
+                remaining - 1,
+            )
+            total = value + child_value
+            if total > best[0]:
+                best = (total, (node,) + child_path, child_hp)
+        memo[key] = best
+        return best
+
+    ranked = []
+    for child in choices:
+        value, path, hp_after = solve(child, start_hp, 0, 0, depth)
+        ranked.append((value, child, path, hp_after))
+    if not ranked:
+        return None
+    ranked.sort(key=lambda item: -item[0])
+
+    def fmt(path):
+        return " → ".join(
+            f"{TYPE_NAMES.get(nodes[k].get('Type', 0), '?')}({k[0]},{k[1]})"
+            for k in path
+        )
+
+    advice = [
+        _advice(
+            "map.recommend",
+            f"推荐路线（局部前瞻 {depth} 步，完整 Boss 图不可用）：{fmt(ranked[0][2])}；"
+            f"预计 HP {ranked[0][3]}/{max_hp}，评分 {ranked[0][0]:.1f}",
+            "warn",
+        )
+    ]
+    lines = [
+        f"{TYPE_NAMES.get(nodes[child].get('Type', 0), '?')}（{child[0]},{child[1]}）  "
+        f"评分 {value:.1f}  HP→{hp_after}/{max_hp}  {fmt(path[:5])}"
+        for value, child, path, hp_after in ranked
+    ]
+    advice.append(_advice(
+        "map.route",
+        "下一步（局部前瞻，分数包含之后节点）：\n" + "\n".join(lines),
+        "info",
+    ))
+    return advice
+
+
+_EVENT_EXIT_WORDS = (
+    "离开", "敬而远之", "退出", "不选择", "放弃", "拒绝", "走开",
+    "exit", "leave", "abstain", "walk away",
+)
+_EVENT_DAMAGE_WORDS = (
+    "受到", "伤害", "掉血", "扣血", "damage", "hp loss",
+)
+_EVENT_DEATH_WORDS = (
+    "死定了", "必死", "会死", "致命", "再泡下去", "无法生还", "死亡",
+    "will kill", "certain death", "fatal",
+)
+
+
+def _event_num(value, default: float = 0.0) -> float:
+    try:
+        if isinstance(value, bool):
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _event_option_text(option) -> str:
+    return " ".join(
+        str(option.get(key) or "")
+        for key in ("TextKey", "Title", "Description")
+    )
+
+
+def _event_is_exit(option) -> bool:
+    text = _event_option_text(option).lower()
+    return any(word in text for word in _EVENT_EXIT_WORDS)
+
+
+def _event_has_damage(option) -> bool:
+    text = _event_option_text(option).lower()
+    if any(word in text for word in _EVENT_DAMAGE_WORDS):
+        return True
+    return ("失去" in text or "lose" in text) and ("生命" in text or "hp" in text)
+
+
+def _event_death_warning(state) -> bool:
+    text = str(state.get("EventDescription") or "").lower()
+    return any(word in text for word in _EVENT_DEATH_WORDS)
+
+
+def _event_score(option):
+    if option.get("Locked"):
+        return -999
+    text = f"{option.get('Title', '')} {option.get('Description', '')}"
+    score = 0
+    if option.get("Proceed"):
+        score -= 10
+    if option.get("RelicId") or option.get("RelicName"):
+        score += score_relic(option.get("RelicId") or option.get("RelicName"))
+    for word, delta in (
+        ("获得", 2), ("遗物", 2), ("稀有", 2), ("升级", 2), ("移除", 2),
+        ("金币", 1), ("治疗", 1), ("回复", 1), ("最大生命", 2), ("无色", 1),
+        ("复制", 1), ("变化", 1),
+    ):
+        if word in text:
+            score += delta
+    for word, delta in (
+        ("失去", -3), ("伤害", -2), ("诅咒", -5), ("中毒", -2),
+        ("掉血", -2), ("减少", -2), ("无法", -3), ("锁定", -3),
+    ):
+        if word in text:
+            score += delta
+    return score
+
+
+def _abyssal_baths_preview(state, option):
+    """Known model for AbyssalBaths (fixed 0.107.1 source).
+
+    Each immerse/linger grants +MaxHp current & max HP, then deals the
+    event's current Damage (unblockable/unpowered); Damage grows by 1 after
+    every click. The option preview in game subtracts the MaxHp gain, so the
+    net HP loss is Damage - MaxHp.
+    """
+    if str(state.get("EventId") or "") != "AbyssalBaths":
+        return None
+    if _event_is_exit(option) or not _event_has_damage(option):
+        return None
+
+    variables = state.get("EventVars") or {}
+    if not isinstance(variables, dict):
+        variables = {}
+    damage = _event_num(variables.get("Damage"))
+    gain = _event_num(variables.get("MaxHp"))
+    if damage <= 0:
+        return None
+    if gain <= 0:
+        gain = 2.0
+
+    hp = _event_num(state.get("Hp"))
+    max_hp = _event_num(state.get("MaxHp"))
+    net = max(0.0, damage - gain)
+    hp_after = hp - net
+    next_net = net + 1.0
+    limit = max(3.0, max_hp * 0.04)
+    too_risky = net > limit or hp_after <= max(8.0, max_hp * 0.30)
+    return {
+        "damage": damage,
+        "gain": gain,
+        "net": net,
+        "hp_after": hp_after,
+        "next_net": next_net,
+        "too_risky": too_risky,
+        "lethal": hp_after <= 0,
+    }
+
+
+def _event_analysis(state, option, index):
+    score = _event_score(option)
+    if option.get("Locked"):
+        return {"index": index, "option": option, "score": score, "lethal": False, "risk": False, "note": ""}
+
+    if _event_is_exit(option) and not _event_has_damage(option):
+        return {"index": index, "option": option, "score": score, "lethal": False, "risk": False, "note": ""}
+
+    warning = _event_death_warning(state)
+    preview = _abyssal_baths_preview(state, option)
+    if preview is not None:
+        net = preview["net"]
+        after = preview["hp_after"]
+        note = (
+            "本次净损失 %d HP（+%d 最大生命，受 %d 伤害），剩 %d；下次净损失 %d"
+            % (net, preview["gain"], preview["damage"], after, preview["next_net"])
+        )
+        if preview["lethal"]:
+            return {
+                "index": index, "option": option, "score": -1000,
+                "lethal": True, "risk": True,
+                "note": "本次净损失 %d HP，当前 %d，会死亡" % (net, state.get("Hp", 0)),
+            }
+        if warning:
+            return {
+                "index": index, "option": option, "score": -1000,
+                "lethal": True, "risk": True,
+                "note": "事件已警告继续会死亡（本次净损失 %d HP，当前 %d）" % (net, state.get("Hp", 0)),
+            }
+        if preview["too_risky"]:
+            return {
+                "index": index, "option": option, "score": score - 25.0,
+                "lethal": False, "risk": True,
+                "note": "本次净损失 %d HP，只剩 %d；继续换 %d 最大生命不划算" % (net, after, preview["gain"]),
+            }
+        return {
+            "index": index, "option": option,
+            "score": score + max(0.0, 1.2 - 0.4 * net),
+            "lethal": False, "risk": False, "note": note,
+        }
+
+    if warning and _event_has_damage(option):
+        return {
+            "index": index, "option": option, "score": -1000,
+            "lethal": True, "risk": True,
+            "note": "事件已警告继续会死亡",
+        }
+
+    hp = _event_num(state.get("Hp"))
+    max_hp = _event_num(state.get("MaxHp"))
+    if max_hp > 0 and _event_has_damage(option) and hp <= max(8.0, max_hp * 0.40):
+        return {
+            "index": index, "option": option, "score": score - 12.0,
+            "lethal": False, "risk": True,
+            "note": "当前 HP %d/%d 偏低，伤害/失去生命选项代价过高" % (hp, max_hp),
+        }
+
+    return {"index": index, "option": option, "score": score, "lethal": False, "risk": False, "note": ""}
+
+
+def _event(state):
+    title = str(state.get("EventTitle") or state.get("EventId") or "事件")
+    description = str(state.get("EventDescription") or "")
+    options = [item for item in state.get("EventOptions") or [] if isinstance(item, dict)]
+    context = f"事件：{title}" + (f"\n{description}" if description else "")
+    if not options:
+        return [_advice("event.context", context + "\n当前没有可选项。", "info")]
+
+    analysis = [
+        _event_analysis(state, option, index)
+        for index, option in enumerate(options)
+    ]
+    lethal = [item for item in analysis if item["lethal"]]
+    usable = [item for item in analysis if item["score"] > -900 and not item["lethal"]]
+    if not usable:
+        if lethal:
+            notes = "；".join(
+                "「%s」%s" % (item["option"].get("Title") or "选项", item["note"])
+                for item in lethal
+            )
+            return [_advice("event.lethal", "没有安全选项，且选择会死亡：" + notes, "danger")]
+        return [_advice("event.no_option", "所有选项都不可用。", "warn")]
+
+    usable.sort(key=lambda item: (-item["score"], item["index"]))
+    best = usable[0]
+    advice = []
+    for item in lethal:
+        advice.append(_advice(
+            "event.lethal",
+            "「%s」%s" % (item["option"].get("Title") or "选项", item["note"]),
+            "danger",
+        ))
+
+    suffix = f"；{best['note']}" if best.get("note") else ""
+    if not suffix:
+        risk_notes = [
+            "「%s」%s" % (item["option"].get("Title") or "选项", item["note"])
+            for item in analysis
+            if item["risk"] and not item["lethal"] and item["index"] != best["index"]
+        ]
+        if risk_notes:
+            suffix = "；" + "；".join(risk_notes)
+    has_risk = bool(lethal) or any(
+        item["risk"] for item in analysis if item["index"] != best["index"]
+    )
+    advice.append(_advice(
+        "event.recommend",
+        f"推荐：{best['option'].get('Title') or ('选项 %d' % (best['index'] + 1))}"
+        f"（评分 {best['score']:.1f}）{suffix}",
+        "warn" if has_risk or best["risk"] else "good",
+    ))
+
+    return advice
+
+
+def _shop_score(state, item):
+    kind = item.get("Kind")
+    if kind in ("card", "colorless"):
+        card = item.get("Card") or {}
+        score = score_card(state, card)
+        if kind == "colorless":
+            score += 0.3
+    elif kind == "relic":
+        score = score_relic(item.get("RelicId") or item.get("RelicName"))
+    elif kind == "potion":
+        score = score_potion(item.get("PotionId") or item.get("Name"))
+        if len(state.get("Potions") or []) >= 3:
+            score -= 2.0
+    elif kind == "removal":
+        bad = sum(1 for c in _deck(state) if c.get("Type") in (4, 5))
+        score = 2.5 if bad else 0.6
+    else:
+        score = 0.0
+    return score
+
+
+def _shop(state):
+    items = [item for item in state.get("ShopItems") or [] if isinstance(item, dict)]
+    if not items:
+        return [_advice("shop.empty", "商店没有读到商品。", "info")]
+
+    gold = int(state.get("Gold", 0))
+    ranked = sorted(
+        ((_shop_score(state, item), item) for item in items),
+        key=lambda pair: -pair[0],
+    )
+    affordable = [pair for pair in ranked if pair[1].get("Affordable")]
+    advice = []
+    if affordable:
+        score, best = affordable[0]
+        advice.append(_advice(
+            "shop.recommend",
+            f"推荐购买：{best.get('Name', '?')}（{best.get('Cost', 0)} 金，评分 {score:.1f}，剩 {gold - int(best.get('Cost', 0))} 金）",
+            "good"))
+    else:
+        advice.append(_advice("shop.no_affordable", f"金币 {gold}，没有买得起的商品；建议跳过。", "info"))
+
+    lines = []
+    for score, item in ranked:
+        state_text = "可买" if item.get("Affordable") else "金币不足"
+        lines.append(f"• {item.get('Name', '?')}  {item.get('Cost', 0)} 金（{state_text}，评分 {score:.1f}）")
+    advice.append(_advice("shop.items", "商店：\n" + "\n".join(lines), "info"))
+    return advice
+
+
+def _rest(state):
+    options = [item for item in state.get("RestOptions") or [] if isinstance(item, dict)]
+    if not options:
+        return [_advice("rest.empty", "营地没有读到选项。", "info")]
+
+    missing = max(0, int(state.get("MaxHp", 0)) - int(state.get("Hp", 0)))
+    upgrade = None
+    for card in _deck(state):
+        if int(card.get("Upgraded") or 0) == 0:
+            if upgrade is None or score_card(state, card) > score_card(state, upgrade):
+                upgrade = card
+
+    ranked = []
+    for option in options:
+        if not option.get("Enabled", True):
+            continue
+        option_id = str(option.get("OptionId") or "").upper()
+        if option_id == "HEAL":
+            heal = min(missing, int(option.get("HealAmount") or 0))
+            score = (heal / max(1, int(state.get("MaxHp", 1)))) * 10
+            if int(state.get("Hp", 0)) * 2 < int(state.get("MaxHp", 1)):
+                score += 3
+        elif option_id == "SMITH":
+            score = 2.0 if upgrade is not None else 0.0
+        elif option_id in ("DIG", "LIFT"):
+            score = 2.8
+        else:
+            score = 1.5
+        ranked.append((score, option))
+
+    ranked.sort(key=lambda pair: -pair[0])
+    if not ranked:
+        return [_advice("rest.no_option", "营地没有可用选项。", "warn")]
+
+    score, best = ranked[0]
+    advice = [_advice("rest.recommend", f"推荐：{best.get('Title', '?')}（评分 {score:.1f}）", "good")]
+    if str(best.get("OptionId") or "").upper() == "SMITH" and upgrade is not None:
+        advice.append(_advice("rest.smith_target", f"升级推荐：{upgrade.get('Name', '?')}（当前评分 {score_card(state, upgrade):.1f}）", "info"))
+
+    lines = []
+    for value, option in ranked:
+        heal = f"  回复 {option.get('HealAmount')}" if option.get("HealAmount") else ""
+        lines.append(f"• {option.get('Title', '?')}{heal}  评分 {value:.1f}")
+        if option.get("Description"):
+            lines.append("   " + str(option["Description"]))
+    advice.append(_advice("rest.options", "营地：\n" + "\n".join(lines), "info"))
+    return advice
+
+
+def _treasure(state):
+    relics = [item for item in state.get("RelicChoices") or [] if isinstance(item, dict)]
+    if not relics:
+        return [_advice("treasure.waiting", "宝箱/遗物选择还没出现。", "info")]
+
+    ranked = sorted(
+        ((score_relic(relic.get("Id") or relic.get("Name")) + 0.1 * min(5, int(relic.get("Rarity") or 0)), relic)
+         for relic in relics),
+        key=lambda pair: -pair[0],
+    )
+    score, best = ranked[0]
+    advice = [_advice("treasure.recommend", f"推荐：{best.get('Name', '?')}（评分 {score:.1f}）", "good")]
+    lines = []
+    for value, relic in ranked:
+        lines.append(f"• {relic.get('Name', '?')}  评分 {value:.1f}")
+        if relic.get("Description"):
+            lines.append("   " + str(relic["Description"]))
+    advice.append(_advice("treasure.options", "遗物选择：\n" + "\n".join(lines), "info"))
     return advice
 
 
@@ -286,6 +909,9 @@ def _map(state):
     full = _map_dp(state)
     if full is not None:
         return full
+    lookahead = _map_lookahead(state)
+    if lookahead is not None:
+        return lookahead
 
     choices = state.get("MapChoices") or []
     if not choices:
@@ -302,19 +928,34 @@ def _map(state):
 
 def _enemy_labels(names):
     counts = {}
-    labels = []
+    seen = {}
     for name in names:
         counts[name] = counts.get(name, 0) + 1
-        labels.append(name if counts[name] == 1 else f"{name}#{counts[name]}")
+    labels = []
+    for name in names:
+        if counts.get(name, 0) <= 1:
+            labels.append(name)
+            continue
+        seen[name] = seen.get(name, 0) + 1
+        labels.append(f"{name}#{seen[name]}")
     return labels
 
 
-def _format_sequence(result):
+def _upgrade_mark(name: str, level: int) -> str:
+    if level <= 0:
+        return name
+    return f"{name}+{level}" if level > 1 else f"{name}+"
+
+
+def _sequence_parts(result):
     labels = _enemy_labels(result.enemy_names)
-    cards = {card.index: card.name for card in result.modeled}
+    cards = {
+        card.index: _upgrade_mark(card.name, card.upgrade_level)
+        for card in result.modeled
+    }
     parts = []
     for play in result.plays:
-        text = play.name
+        text = _upgrade_mark(play.name, play.upgrade_level)
         if play.target_all:
             text += "→全体"
         elif play.target_index is not None and play.target_index < len(labels):
@@ -322,13 +963,281 @@ def _format_sequence(result):
         if play.discard_index is not None:
             text += f"（弃{cards.get(play.discard_index, '?')}）"
         parts.append(text)
-    return " → ".join(parts)
+    return parts
+
+
+def _format_sequence(result):
+    return " → ".join(_sequence_parts(result))
+
+
+def _potion_damage_options(state):
+    """Return available direct-damage potions as (name, damage, hits_all)."""
+    result = []
+    for entry in _potion_entries(state):
+        if _potion_role(entry) != "damage":
+            continue
+        key = _potion_key(entry)
+        entity = entry.get("entity") or {}
+        if "explosive" in key:
+            damage, hits_all = 10, True
+        elif "fire" in key:
+            damage, hits_all = 20, False
+        elif "shaped" in key:
+            damage, hits_all = 15, False
+        else:
+            damage, hits_all = 0, entity.get("target") == "AllEnemies"
+            for effect in entity.get("effects") or []:
+                if effect.get("kind") not in ("damage", "self_damage"):
+                    continue
+                for var in entity.get("vars") or []:
+                    if var.get("key") == effect.get("amount"):
+                        damage = max(damage, int(var.get("base") or 0))
+                        break
+            if not damage:
+                for var in entity.get("vars") or []:
+                    if var.get("key") == "Damage":
+                        damage = max(damage, int(var.get("base") or 0))
+                        break
+        if damage > 0:
+            result.append((entry["name"], damage, bool(hits_all)))
+    return result
+
+
+def _potion_kill_advice(state, result):
+    """Explain a damage potion that can finish before end-of-turn burdens."""
+    hp = int(state.get("Hp", 0))
+    end_damage = result.outcome.end_turn_damage
+    if result.outcome.hp_after > 0 or end_damage < hp:
+        return None
+    enemies = state.get("Enemies") or []
+    enemy_hp = sum(max(0, int(e.get("Hp") or 0)) for e in enemies if int(e.get("Hp") or 0) > 0)
+    if enemy_hp <= 0:
+        return None
+    intangible = any(int((e.get("Powers") or {}).get("IntangiblePower") or 0) > 0 for e in enemies)
+    max_attack = 0
+    for card in state.get("Hand") or []:
+        if int(card.get("Type") or 0) == 1:
+            max_attack = max(max_attack, int(card.get("Damage") or 0) * max(1, int(card.get("Hits") or 1)))
+    options = _potion_damage_options(state)
+    for name, damage, _ in options:
+        effective = min(1, damage) if intangible else damage
+        if effective + max_attack >= enemy_hp:
+            return f"先用{name}（{effective} 伤害）+ 最高伤害牌（约 {max_attack}），本回合先杀，避免回合结束的 {end_damage} 点不可格挡伤害。"
+    return None
+
+
+def _potion_entries(state, reward=False):
+    """Return current/reward potions with ids, labels, catalog data and scores."""
+    if reward:
+        ids = [str(item) for item in (state.get("RewardPotionIds") or [])]
+        names = [str(item) for item in (state.get("RewardPotions") or [])]
+    else:
+        ids = [str(item) for item in (state.get("PotionIds") or [])]
+        names = [str(item) for item in (state.get("Potions") or [])]
+    entries = []
+    count = max(len(ids), len(names))
+    for index in range(count):
+        potion_id = ids[index] if index < len(ids) else ""
+        name = names[index] if index < len(names) else ""
+        entity = model_catalog.potion(potion_id) or model_catalog.potion(name)
+        label = name or (entity or {}).get("class") or potion_id or "?"
+        entries.append({
+            "id": potion_id,
+            "name": label,
+            "entity": entity or {},
+            "score": score_potion(potion_id or name),
+        })
+    return entries
+
+
+def _potion_key(entry) -> str:
+    entity = entry.get("entity") or {}
+    values = [str(entity.get("class") or ""), str(entity.get("id") or ""),
+              str(entry.get("id") or ""), str(entry.get("name") or "")]
+    return " ".join(values).lower().replace(" ", "")
+
+
+def _potion_role(entry) -> str:
+    key = _potion_key(entry)
+    if any(word in key for word in ("explosiveampoule", "firepotion", "potionshapedrock")):
+        return "damage"
+    if "beetlejuice" in key:
+        return "shrink"
+    if "heartofiron" in key:
+        return "plating"
+    if "ghostinajar" in key or "intangible" in key:
+        return "intangible"
+    if "blockpotion" in key or "shipinabottle" in key:
+        return "block"
+    if "weakpotion" in key or "potionofbinding" in key:
+        return "weaken"
+    if "poisonpotion" in key:
+        return "poison"
+    if "bloodpotion" in key or "fruitjuice" in key or "fairyinabottle" in key:
+        return "heal"
+    effects = {e.get("kind") for e in (entry.get("entity") or {}).get("effects") or []}
+    if "damage" in effects:
+        return "damage"
+    if "block" in effects:
+        return "block"
+    if "heal" in effects:
+        return "heal"
+    return "other"
+
+
+def _potion_inventory(state):
+    entries = _potion_entries(state)
+    if not entries:
+        return []
+    ranked = sorted(entries, key=lambda item: -item["score"])
+    shown = "、".join(f"{item['name']}（{item['score']:.1f}）" for item in ranked)
+    if len(entries) >= 3:
+        worst = ranked[-1]
+        text = (
+            f"药水 {len(entries)}/3：{shown}。药水已满，最差的是 {worst['name']}；"
+            f"奖励/商店出现更高分药水时优先丢弃它。"
+        )
+        severity = "warn"
+    else:
+        text = f"药水 {len(entries)}/3：{shown}；还有空位，优先保留高分的伤害/保命药水。"
+        severity = "info"
+    return [_advice("potion.inventory", text, severity)]
+
+
+def _potion_reward(state):
+    rewards = _potion_entries(state, reward=True)
+    if not rewards:
+        return []
+    current = _potion_entries(state)
+    ranked = sorted(rewards, key=lambda item: -item["score"])
+    best = ranked[0]
+    advice = []
+    if len(current) < 3:
+        advice.append(_advice(
+            "potion.reward",
+            f"药水奖励：推荐拿 {best['name']}（评分 {best['score']:.1f}）；"
+            f"当前 {len(current)}/3，还有空位。",
+            "good"))
+    else:
+        worst = min(current, key=lambda item: item["score"])
+        if best["score"] >= worst["score"] + 0.2:
+            advice.append(_advice(
+                "potion.reward",
+                f"药水奖励：推荐丢弃 {worst['name']}（评分 {worst['score']:.1f}），"
+                f"换成 {best['name']}（评分 {best['score']:.1f}）；药水栏已满。",
+                "warn"))
+            advice.append(_advice(
+                "potion.discard",
+                f"丢弃 {worst['name']}，拿 {best['name']}。",
+                "warn"))
+        else:
+            advice.append(_advice(
+                "potion.reward",
+                f"药水奖励：{best['name']}（评分 {best['score']:.1f}）不如当前最差 "
+                f"{worst['name']}（{worst['score']:.1f}），药水栏已满，建议跳过。",
+                "info"))
+    return advice
+
+
+def _potion_combat(state, result):
+    """Recommend a potion only when it changes this turn's survival/lethal."""
+    entries = _potion_entries(state)
+    if not entries:
+        return []
+
+    hp = int(state.get("Hp") or 0)
+    max_hp = max(1, int(state.get("MaxHp") or 1))
+    incoming = result.outcome.incoming
+    block = result.block_left
+    end_damage = result.outcome.end_turn_damage
+    base_after = result.outcome.hp_after
+    enemy_hp_left = result.outcome.enemy_hp_left
+    encounter = str(state.get("Encounter") or "")
+    boss_or_elite = "boss" in encounter.lower() or "elite" in encounter.lower()
+    severe = (
+        base_after <= 0
+        or hp <= max(10, int(max_hp * 0.35))
+        or result.outcome.hp_loss >= max(10, int(max_hp * 0.25))
+        or (boss_or_elite and result.outcome.hp_loss >= max(6, int(max_hp * 0.15)))
+    )
+    if not severe:
+        return []
+
+    candidates = []
+    for entry in entries:
+        entity = entry.get("entity") or {}
+        if "automatic" in str(entity.get("usage") or "").lower():
+            continue
+        role = _potion_role(entry)
+        name = entry["name"]
+        key = _potion_key(entry)
+        new_after = None
+        detail = ""
+        if role == "damage":
+            all_enemies = "explosive" in key
+            damage = 10 if all_enemies else (20 if "fire" in key else 15)
+            if enemy_hp_left > 0 and (all_enemies or len(state.get("Enemies") or []) <= 1):
+                if damage >= enemy_hp_left:
+                    new_after = max(0, hp - end_damage)
+                    detail = f"{damage} 点{'全体' if all_enemies else ''}伤害可收尾，预计 HP {new_after}"
+        elif role in ("block", "plating"):
+            extra = 12 if role == "block" else 7
+            new_after = max(0, hp - end_damage - max(0, incoming - block - extra))
+            detail = f"+{extra} 格挡，预计 HP {new_after}"
+        elif role == "shrink":
+            reduced = int(incoming * 0.3)
+            new_after = max(0, hp - end_damage - max(0, incoming - block - reduced))
+            detail = f"敌人攻击约 -{reduced}，预计 HP {new_after}"
+        elif role == "intangible":
+            hits = sum(
+                int(attack.get("Hits") or 1)
+                for enemy in state.get("Enemies") or []
+                if int(enemy.get("Hp") or 0) > 0
+                for attack in enemy.get("Attacks") or []
+            )
+            new_after = max(0, hp - end_damage - max(0, min(incoming, hits) - block))
+            detail = f"本回合每次伤害上限 1（约 {hits} 段），预计 HP {new_after}"
+        elif role == "weaken":
+            reduced = int(incoming * 0.25)
+            new_after = max(0, hp - end_damage - max(0, incoming - block - reduced))
+            detail = f"敌人攻击约 -{reduced}，预计 HP {new_after}"
+        elif role == "heal" and hp <= int(max_hp * 0.4):
+            new_after = min(max_hp, hp + (12 if "blood" in key else 10))
+            detail = f"回复后 HP {new_after}"
+
+        if new_after is None:
+            continue
+        saved = new_after - base_after
+        if base_after > 0 and saved < 3:
+            continue
+        if saved <= 0 and new_after <= 0:
+            continue
+        if saved <= 0 and base_after > 0:
+            continue
+        candidates.append((saved, new_after, name, detail))
+
+    if not candidates:
+        return []
+    candidates.sort(key=lambda item: (-item[0], -item[1]))
+    saved, new_after, name, detail = candidates[0]
+    severity = "danger" if base_after <= 0 else "warn"
+    return [_advice(
+        "potion.use",
+        f"本回合建议用 {name}：{detail}；不用药水预计 HP {base_after}。",
+        severity,
+    )]
+
 
 
 def _combat_solver(state):
     result, error = solve(state)
     if result is None or not result.modeled:
-        return None, error or "没有可精确模拟的牌"
+        return None, {
+            "version": 1,
+            "error": error or "没有可精确模拟的牌",
+            "modeled": 0,
+            "unmodeled": [],
+        }
 
     advice = []
     used_energy = sum(p.cost for p in result.plays)
@@ -342,12 +1251,15 @@ def _combat_solver(state):
     else:
         head = "本回合不出牌最优"
 
-    if result.outcome.lethal:
+    if hp_after <= 0:
+        severity = "danger"
+        if result.outcome.lethal:
+            tail = "会致死（即使敌方被击杀，也会同归于尽），必须用药水或改打法"
+        else:
+            tail = "会致死，必须用药水或改打法"
+    elif result.outcome.lethal:
         severity = "good"
         tail = "可斩杀"
-    elif hp_after <= 0:
-        severity = "danger"
-        tail = "会致死，必须用药水或改打法"
     elif loss == 0:
         severity = "good"
         tail = "不掉血"
@@ -371,7 +1283,7 @@ def _combat_solver(state):
     advice.append(_advice("combat.solver_detail", detail, "info"))
     advice.append(_advice(
         "combat.solver_assumptions",
-        "求解只含已建模卡牌；未计遗物、药水、抽牌、随机目标与特殊能力修正，实际结果以游戏为准。",
+        "求解只含已建模卡牌/遗物/能力；未计其他遗物、药水使用、抽牌、随机目标与特殊修正，实际结果以游戏为准。",
         "info"))
 
     if result.unmodeled:
@@ -382,13 +1294,69 @@ def _combat_solver(state):
             f"未纳入求解：{shown}{more}；以上结果只含已建模牌。",
             "info"))
 
+    if result.partial:
+        shown = "、".join(f"{name}（{note}）" for name, note in result.partial[:6])
+        advice.append(_advice(
+            "combat.solver_partial",
+            f"部分建模：{shown}；这些牌的已知效果计入求解，未列效果未计。",
+            "warn"))
+
+    potions = [str(item) for item in (state.get("Potions") or [])]
+    potion_ids = {str(item).upper() for item in (state.get("PotionIds") or [])}
+    if potions:
+        is_block_potion = "BLOCK_POTION" in potion_ids or any("格挡" in name or "block" in name.lower() for name in potions)
+        kill_advice = _potion_kill_advice(state, result)
+        if kill_advice:
+            advice.append(_advice("potion.lethal", kill_advice, "danger"))
+        elif result.outcome.hp_after <= 0 and is_block_potion:
+            if result.outcome.end_turn_damage >= int(state.get("Hp", 0)):
+                advice.append(_advice(
+                    "potion.lethal",
+                    "回合结束手牌伤害不可格挡且已致死；格挡药水无效，必须弃掉对应状态牌或改打法。",
+                    "danger"))
+            else:
+                after = min(int(state.get("MaxHp", 0) or 0), result.outcome.hp_after + 12)
+                advice.append(_advice(
+                    "potion.lethal",
+                    f"本回合会致死；先用格挡药水（+12 格挡）预计可活（HP {after}）。",
+                    "danger"))
+        elif result.outcome.hp_after <= 0:
+            advice.append(_advice(
+                "potion.lethal",
+                "本回合会致死；药水栏有：" + "、".join(potions) + "，考虑先用保命/斩杀药水。",
+                "danger"))
+        elif result.outcome.hp_loss >= max(1, int(state.get("MaxHp", 1)) // 3):
+            advice.append(_advice(
+                "potion.consider",
+                f"预计掉 {result.outcome.hp_loss} 血；药水：" + "、".join(potions) + "。",
+                "warn"))
+
+    advice.extend(_potion_combat(state, result))
+
     if result.truncated:
         advice.append(_advice(
             "combat.solver_truncated",
             "搜索达到时间/节点上限，序列是当前最优近似。",
             "warn"))
 
-    return advice, None
+    payload = {
+        "version": 1,
+        "sequence": _sequence_parts(result),
+        "hpLoss": loss,
+        "hpAfter": hp_after,
+        "incoming": result.outcome.incoming,
+        "block": result.block_left,
+        "energyLeft": max(0, int(state.get("Energy", 0)) - used_energy),
+        "enemyHpLeft": result.outcome.enemy_hp_left,
+        "damageDealt": outgoing,
+        "poisonKills": result.outcome.poison_kills,
+        "lethal": result.outcome.lethal,
+        "truncated": result.truncated,
+        "modeled": len(result.modeled),
+        "unmodeled": [name for name, _ in result.unmodeled],
+        "partial": [name for name, _ in result.partial],
+    }
+    return advice, payload
 
 
 def _combat_rough(state):
@@ -439,19 +1407,20 @@ def _combat_rough(state):
 
 
 def _combat(state):
-    solved, error = _combat_solver(state)
+    solved, solver = _combat_solver(state)
     rough = _combat_rough(state)
     if solved is not None:
         extras = [
             item for item in rough
             if item["ruleId"].startswith("resources.") or item["ruleId"].startswith("potion.")
         ]
-        return solved + extras
+        return solved + extras, solver
 
+    error = (solver or {}).get("error")
     advice = []
     if error and error != "手牌为空":
         advice.append(_advice("combat.solver_unavailable", f"未使用求解器：{error}", "info"))
-    return advice + rough
+    return advice + rough, solver
 
 
 def _overview(state):
@@ -462,13 +1431,28 @@ def advise(state: dict) -> dict:
     if state.get("ValidationError"):
         return {"advice": [_advice("state.invalid", "状态校验失败：" + str(state["ValidationError"]), "danger")], "source": "python"}
 
-    if state.get("CardChoices"):
+    solver = None
+    if state.get("CardChoices") or state.get("RewardPotions") or state.get("RewardPotionIds"):
         advice = _reward(state)
+    elif state.get("InShop"):
+        advice = _shop(state)
+    elif state.get("InRestSite"):
+        advice = _rest(state)
+    elif state.get("InTreasure"):
+        advice = _treasure(state)
+    elif state.get("InEvent"):
+        advice = _event(state)
+    elif state.get("InCombat"):
+        advice, solver = _combat(state)
     elif state.get("MapChoices"):
         advice = _map(state)
-    elif state.get("InCombat"):
-        advice = _combat(state)
     else:
         advice = _overview(state)
 
-    return {"advice": advice, "source": "python"}
+    if not state.get("InCombat") and state.get("Potions"):
+        advice.extend(_potion_inventory(state))
+
+    response = {"advice": advice, "source": "python"}
+    if solver is not None:
+        response["solver"] = solver
+    return response
