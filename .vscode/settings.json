@@ -1,0 +1,9 @@
+{
+  "files.encoding": "utf8",
+  "files.trimTrailingWhitespace": true,
+  "files.insertFinalNewline": true,
+  "editor.formatOnSave": true,
+  "python.analysis.extraPaths": ["${workspaceFolder}/py/rules"],
+  "python.terminal.activateEnvironment": false,
+  "dotnet.server.useOmnisharp": false
+}

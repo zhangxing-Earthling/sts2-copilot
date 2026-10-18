@@ -1,0 +1,13 @@
+<Application x:Class="Sts2Copilot.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             StartupUri="MainWindow.xaml">
+    <Application.Resources>
+        <SolidColorBrush x:Key="Bg" Color="#0E1116" />
+        <SolidColorBrush x:Key="Panel" Color="#161B22" />
+        <SolidColorBrush x:Key="Line" Color="#2A3240" />
+        <SolidColorBrush x:Key="Text" Color="#D8E0EA" />
+        <SolidColorBrush x:Key="Muted" Color="#8B98A8" />
+        <SolidColorBrush x:Key="Accent" Color="#4C9AFF" />
+    </Application.Resources>
+</Application>

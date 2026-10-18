@@ -1,0 +1,23 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{json,yml,yaml,md}]
+indent_size = 2
+
+[*.py]
+indent_size = 4
+max_line_length = 120
+
+[*.cs]
+indent_size = 4
+csharp_new_line_before_open_brace = all
+
+[*.{csproj,props,targets,xaml}]
+indent_size = 2

@@ -1,0 +1,26 @@
+# build output
+bin/
+obj/
+dist/
+.godot/
+.vs/
+
+# local game reference / toolchain
+ref/
+tools/dotnet/
+tools/tools/
+data/
+
+# logs and captures
+*.log
+captures/
+publish.log
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+
+# secrets
+.env
+.env.*
