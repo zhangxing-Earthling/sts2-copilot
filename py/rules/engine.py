@@ -139,7 +139,152 @@ def map_score(state, node) -> tuple[float, str]:
     return 0.0, "Boss/特殊节点"
 
 
+def _node_loss(state, node):
+    act = min(3, max(1, int(state.get("Act", 1))))
+    table = {1: (6, 20, 5), 2: (9, 28, 7), 3: (12, 35, 9)}[act]
+    point_type = node.get("Type", 0)
+    if point_type == 5:
+        loss = table[0]
+    elif point_type == 6:
+        loss = table[1]
+    elif point_type == 1:
+        loss = table[2]
+    else:
+        loss = 0
+
+    if point_type == 6 and len(state.get("DeckCards") or []) < 15:
+        loss += 8
+    return loss
+
+
+def _node_reward(state, node):
+    point_type = node.get("Type", 0)
+    if point_type == 6:
+        return 2.8
+    if point_type == 5:
+        return 1.0
+    if point_type == 3:
+        return 1.8
+    if point_type == 4:
+        return 0.8
+    if point_type == 2:
+        return 1.0 if int(state.get("Gold", 0)) >= 120 else 0.2
+    if point_type == 1:
+        return 0.9
+    return 0.0
+
+
+def _risk_penalty(hp, max_hp):
+    ratio = hp / max(1, max_hp)
+    if ratio < 0.15:
+        return -5.0
+    if ratio < 0.3:
+        return -1.5
+    return 0.0
+
+
+def _map_dp(state):
+    """Full DAG DP from the current node to the boss.
+
+    State = (node, hp); value = node rewards + child value - low-hp risk.
+    Returns None when the full graph is unavailable.
+    """
+    nodes_list = state.get("MapNodes") or []
+    edges = state.get("MapEdges") or []
+    if len(nodes_list) < 3 or not edges:
+        return None
+
+    nodes = {(n.get("Col"), n.get("Row")): n for n in nodes_list}
+    start = (state.get("MapCol"), state.get("MapRow"))
+    boss = next((k for k, n in nodes.items() if n.get("Type") == 7), None)
+    if start not in nodes or boss is None:
+        return None
+
+    adjacency = {}
+    for edge in edges:
+        a = (edge.get("FromCol"), edge.get("FromRow"))
+        b = (edge.get("ToCol"), edge.get("ToRow"))
+        adjacency.setdefault(a, []).append(b)
+
+    max_hp = max(1, int(state.get("MaxHp", 1)))
+    start_hp = max(1, int(state.get("Hp", 1)))
+    memo = {}
+
+    def solve(node, hp):
+        key = (node, hp)
+        if key in memo:
+            return memo[key]
+
+        info = nodes.get(node)
+        if info is None:
+            return (-1e9, (), hp)
+        if info.get("Type") == 7:
+            return (0.0, (node,), hp)
+
+        loss = _node_loss(state, info)
+        heal = int(max_hp * 0.3) if info.get("Type") == 4 else 0
+        hp_after = min(max_hp, hp - loss + heal)
+        if hp_after <= 0:
+            return (-1e9, (), hp_after)
+
+        value = _node_reward(state, info) + _risk_penalty(hp_after, max_hp)
+        children = adjacency.get(node, [])
+        if not children:
+            result = (value, (node,), hp_after)
+            memo[key] = result
+            return result
+
+        best_total = -1e9
+        best_path = ()
+        best_hp = hp_after
+        for child in children:
+            child_value, child_path, child_hp = solve(child, hp_after)
+            total = value + child_value
+            if total > best_total:
+                best_total = total
+                best_path = child_path
+                best_hp = child_hp
+
+        result = (best_total, (node,) + best_path, best_hp)
+        memo[key] = result
+        return result
+
+    ranked = []
+    for child in adjacency.get(start, []):
+        value, path, hp_after = solve(child, start_hp)
+        ranked.append((value, child, path, hp_after))
+
+    if not ranked:
+        return None
+
+    ranked.sort(key=lambda item: -item[0])
+
+    def fmt_path(path):
+        return " → ".join(
+            f"{TYPE_NAMES.get(nodes[k].get('Type', 0), '?')}({k[0]},{k[1]})"
+            for k in path
+        )
+
+    advice = []
+    best_value, best_child, best_path, best_hp = ranked[0]
+    advice.append(_advice(
+        "map.recommend",
+        f"推荐路线：{fmt_path(best_path)}；预计结束 HP {best_hp}，评分 {best_value:.1f}",
+        "good"))
+
+    lines = []
+    for value, child, path, hp_after in ranked:
+        preview = fmt_path(path[:4])
+        lines.append(f"{TYPE_NAMES.get(nodes[child].get('Type', 0), '?')}（{child[0]},{child[1]}）  评分 {value:.1f}  HP→{hp_after}  {preview}")
+    advice.append(_advice("map.route", "第一层：\n" + "\n".join(lines), "info"))
+    return advice
+
+
 def _map(state):
+    full = _map_dp(state)
+    if full is not None:
+        return full
+
     choices = state.get("MapChoices") or []
     if not choices:
         return []

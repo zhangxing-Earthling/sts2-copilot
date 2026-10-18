@@ -311,6 +311,24 @@ if (args.Length >= 2 && args[0] == "map")
         ClrValueType ch = child.ReadValueTypeField("coord");
         Console.WriteLine($"child {ch.ReadField<int>("col")},{ch.ReadField<int>("row")} type={ReadInt(child, "<PointType>k__BackingField")}");
     }
+    int nodeCount = 0, edgeCount = 0;
+    for (int c = 0; c < grid.GetLength(0); c++)
+    {
+        for (int r = 0; r < grid.GetLength(1); r++)
+        {
+            ClrObject p = grid.GetObjectValue(new[] { c, r });
+            if (p.IsNull) continue;
+            nodeCount++;
+            edgeCount += ReadHashSet(ReadObj(p, "<Children>k__BackingField")).Count;
+        }
+    }
+    Console.WriteLine($"grid nodes={nodeCount} edges={edgeCount}");
+    ClrObject boss = ReadObj(map, "<BossMapPoint>k__BackingField");
+    if (!boss.IsNull)
+    {
+        ClrValueType bc = boss.ReadValueTypeField("coord");
+        Console.WriteLine($"boss coord={bc.ReadField<int>("col")},{bc.ReadField<int>("row")} type={ReadInt(boss, "<PointType>k__BackingField")}");
+    }
     return 0;
 }
 

@@ -9,16 +9,11 @@
 - [x] 意图伤害还原：力量、虚弱、易伤、多段
 - [x] 卡牌奖励读取 + 评分 + 推荐
 - [x] 地图当前节点 + 下一层评分
+- [x] 全图 DAG 期望值 DP（节点/边 + Boss，HP 状态）
 - [x] JSONL 日志（run/combat/turn/action/reward）
 - [x] Python 规则服务 + C# 回退
 
 ## 下一步（按优先级）
-
-### P0 全图 DAG 评分
-
-- 从 `RunState.Map` 读完整节点/边，不只下一层
-- Python 用 `networkx` 或自写 DAG DP，按 HP/金币/牌组给路线期望值
-- 验收：分叉地图能给出“走哪条线”的理由，而不是单节点分数
 
 ### P1 战斗求解器
 

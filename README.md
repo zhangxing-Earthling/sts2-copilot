@@ -4,7 +4,7 @@
 
 > 当前仅支持游戏版本 **0.107.1**。版本不匹配会明确报错并拒绝连接，避免静默读错。
 
-![地图评分](docs/images/map-python.png)
+![全图路线 DP](docs/images/map-dp.png)
 
 ![卡牌奖励评分](docs/images/card-reward.png)
 
@@ -27,7 +27,7 @@
 - **意图伤害**：按 `Hook.ModifyDamage` 还原——基础伤害 + 攻击者力量，再乘攻击者虚弱/玩家易伤，最后乘段数
 - **战斗建议**：致死预警、预计掉血、可以全挡、可斩杀（粗算）、能量浪费、0 费牌
 - **三选一**：读三张候选，按稀有度/效果/费用/牌组密度/毒协同评分并推荐
-- **地图**：当前节点 + 下一层节点类型与评分
+- **地图**：读全图节点/边 + Boss，Python 做 HP 状态 DAG DP，输出推荐路线、预计结束 HP、评分
 - **中文名**：直接读游戏内存里的 `LocManager` 表
 - **JSONL 日志**：`%APPDATA%\Sts2Copilot\runs\run_<时间>_<种子>.jsonl`
 - **版本锁 + 状态校验**：HP/能量/手牌/牌堆越界即停止建议，不静默读错
@@ -95,13 +95,13 @@ prompts/            DeepSeek 复盘 / 规则 patch 提示词
 - 特殊意图（非 `DamageCalc` 闭包）可能显示 0 伤害
 - 出牌是推断，不是精确事件；后续改读 `CombatManager.History`
 - 卡牌描述、遗物计数器、能力层数还没显示
-- 地图只评下一层，没有全图 DP
+- 地图掉血是期望值，不是按当前牌组模拟战斗
 - 卡牌协同只到“攻击/格挡密度 + 毒”，没有 tag/关键词
 
 ## 下一步
 
-1. 全图 DAG 期望值 DP（networkx / 自写）
-2. 本回合出牌顺序求解器（numpy）
-3. 记录 `reward_pick` / `map_pick`
-4. 局末 DeepSeek 复盘 + 规则 patch 审核
-5. 商店/事件/营地界面
+1. 本回合出牌顺序求解器（numpy）
+2. 记录 `reward_pick` / `map_pick`
+3. 局末 DeepSeek 复盘 + 规则 patch 审核
+4. 商店/事件/营地界面
+5. 读 `CombatManager.History` 做精确出牌记录

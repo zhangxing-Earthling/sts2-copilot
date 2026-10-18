@@ -19,6 +19,8 @@ C# `GameState` 序列化为 **PascalCase** JSON，POST 到 Python `/advise`。
 | `Enemies` | EnemyInfo[] | 敌人 |
 | `Relics` / `Potions` | string[] | 本地化名称 |
 | `MapChoices` | MapNodeInfo[] | 当前节点可走的下一层 |
+| `MapNodes` | MapNodeInfo[] | 全图节点（含 Boss） |
+| `MapEdges` | MapEdgeInfo[] | 全图有向边 |
 | `MapCol` / `MapRow` / `MapType` / `MapTypeName` | int/string | 当前地图节点 |
 | `RewardGold` | int | 未领取的奖励金币 |
 | `ValidationError` | string? | 非空表示停止建议 |
@@ -54,6 +56,13 @@ C# `GameState` 序列化为 **PascalCase** JSON，POST 到 Python `/advise`。
 | `Col` / `Row` | 地图坐标 |
 | `Type` | 1 未知 / 2 商店 / 3 宝箱 / 4 营地 / 5 战斗 / 6 精英 / 7 Boss / 8 远古 |
 | `TypeName` | 中文名 |
+
+## MapEdgeInfo
+
+| 字段 | 说明 |
+|---|---|
+| `FromCol` / `FromRow` | 起点坐标 |
+| `ToCol` / `ToRow` | 终点坐标 |
 
 ## 示例
 

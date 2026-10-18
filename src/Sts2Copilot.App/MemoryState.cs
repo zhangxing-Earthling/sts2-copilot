@@ -42,6 +42,14 @@ public sealed class MapNodeInfo
     public string TypeName { get; set; } = "";
 }
 
+public sealed class MapEdgeInfo
+{
+    public int FromCol { get; set; }
+    public int FromRow { get; set; }
+    public int ToCol { get; set; }
+    public int ToRow { get; set; }
+}
+
 public sealed class GameState
 {
     public string GameVersion { get; set; } = "";
@@ -73,6 +81,8 @@ public sealed class GameState
     public List<CardInfo> CardChoices { get; set; } = new();
     public int RewardGold { get; set; }
     public List<MapNodeInfo> MapChoices { get; set; } = new();
+    public List<MapNodeInfo> MapNodes { get; set; } = new();
+    public List<MapEdgeInfo> MapEdges { get; set; } = new();
     public int MapCol { get; set; }
     public int MapRow { get; set; }
     public int MapType { get; set; }
@@ -457,10 +467,85 @@ public sealed class MemoryReader : IDisposable
             result.MapType = ReadInt(current, "<PointType>k__BackingField");
             result.MapTypeName = MapTypeName(result.MapType);
 
+            var seenNodes = new HashSet<(int col, int row)>();
+            var seenEdges = new HashSet<(int fromCol, int fromRow, int toCol, int toRow)>();
+
+            void AddNode(ClrObject point)
+            {
+                if (point.IsNull)
+                {
+                    return;
+                }
+
+                (int col, int row) = ReadCoord(point);
+                int type = ReadInt(point, "<PointType>k__BackingField");
+                if (type == 0 || !seenNodes.Add((col, row)))
+                {
+                    return;
+                }
+
+                result.MapNodes.Add(new MapNodeInfo
+                {
+                    Col = col,
+                    Row = row,
+                    Type = type,
+                    TypeName = MapTypeName(type)
+                });
+            }
+
+            void AddEdge(int fromCol, int fromRow, ClrObject child)
+            {
+                if (child.IsNull)
+                {
+                    return;
+                }
+
+                (int toCol, int toRow) = ReadCoord(child);
+                AddNode(child);
+                if (seenEdges.Add((fromCol, fromRow, toCol, toRow)))
+                {
+                    result.MapEdges.Add(new MapEdgeInfo
+                    {
+                        FromCol = fromCol,
+                        FromRow = fromRow,
+                        ToCol = toCol,
+                        ToRow = toRow
+                    });
+                }
+            }
+
+            AddNode(current);
+
+            for (int col = 0; col < cols; col++)
+            {
+                for (int row = 0; row < rows; row++)
+                {
+                    ClrObject point = grid.GetObjectValue(new[] { col, row });
+                    if (point.IsNull)
+                    {
+                        continue;
+                    }
+
+                    AddNode(point);
+                    foreach (ClrObject child in ReadHashSet(ReadObj(point, "<Children>k__BackingField")))
+                    {
+                        AddEdge(col, row, child);
+                    }
+                }
+            }
+
+            ClrObject boss = ReadObj(map, "<BossMapPoint>k__BackingField");
+            AddNode(boss);
+
             foreach (ClrObject child in ReadHashSet(ReadObj(current, "<Children>k__BackingField")))
             {
                 (int col, int row) = ReadCoord(child);
                 int type = ReadInt(child, "<PointType>k__BackingField");
+                if (type == 0)
+                {
+                    continue;
+                }
+
                 result.MapChoices.Add(new MapNodeInfo
                 {
                     Col = col,
