@@ -14,6 +14,7 @@
 | `combat.solver_partial` | 卡牌只建模了确定性部分（如后空翻格挡，抽牌未计） | warn |
 | `combat.solver_truncated` | 搜索达到时间/节点上限 | warn |
 | `combat.solver_unavailable` | 无法精确求解，回退粗算 | info |
+| `combat.eruption` | 敌人带 `SteamEruptionPower`：击杀不会结束战斗，下一回合爆炸 | warn/danger |
 | `combat.lethal_available` | 旧粗算：最大攻击伤害 ≥ 敌方 HP+格挡 | good |
 | `combat.no_attack` | 旧粗算：本回合 incoming = 0 | good |
 | `combat.blocked` | 旧粗算：`Block >= incoming` | good |
@@ -37,6 +38,7 @@
 | `event.recommend` | 事件/先古之民最高分选项；有致死/高风险时降为 warn | good / warn |
 | `event.lethal` | 已知会致死的事件选项；排在推荐前 | danger |
 | `event.no_option` | 所有选项锁定 | warn |
+| `event.upgrade_target` | 事件选项要求选牌升级时，推荐升级目标（1 张或 2 张） | info |
 | `shop.recommend` | 买得起的最高分商品 | good |
 | `shop.no_affordable` | 金币不足 | info |
 | `shop.items` | 商品/价格/评分列表 | info |
@@ -99,29 +101,45 @@ DFS + 记忆化；手牌 ≤10、能量 ≤4；上限 15000 节点 / 220ms。搜
 - X 费纯攻击（如 `Skewer`/串刺）：枚举 `X=1..当前能量`，每点能量增加一段伤害；X 费复合效果仍降级为未建模
 - `ThornsPower`：每次攻击命中前对玩家造成 `Thorns` 点可格挡伤害；多段按段触发
 - `IntangiblePower`：受到的每次伤害/毒结算上限为 1；玩家和敌人都支持
-- 回合结束手牌伤害（`OnTurnEndInHand`，如 Beckon/Burn/Decay/Infection/Toxic/Wither）：不可格挡，计入回合结束；若被 `Survivor` 等弃掉则不计；玩家 `Intangible` 时每张牌最多 1
+- 回合结束手牌伤害（`OnTurnEndInHand`）：`Beckon`/`BadLuck`/`Regret` 是 `Unblockable` 的 HP 损失，不可格挡；`Burn`/`Decay`/`Infection`/`Toxic`/`Wither` 是普通可格挡伤害，先消耗格挡再打 HP。若被 `Survivor` 等弃掉则不计；玩家 `Intangible` 时每张牌最多 1
+- 玩家本回合的牌打死最后一名敌人（且没有死亡召唤/蒸汽喷发）时战斗立即结束：回合结束手牌伤害不再结算（0.107.1 实测；毒在敌方回合才杀就不算，因为那时回合结束伤害已经结算过）
 - `StranglePower`：紧勒造成 8 伤害并施加 2 层；之后每打出一张牌，对该敌人造成 2 点无视格挡伤害（紧勒自身不触发）
 - `RavenousPower`：同伴死亡时，存活且带该能力的敌人 +Ravenous 力量，并眩晕跳过本回合攻击
 - 毒在敌方回合开始结算，无视格挡；毒死敌人后该敌人本回合不攻击
 - 敌人格挡逐段吸收；单体攻击目标死亡后停止后续段数
-- `Survivor` 会尝试弃掉一张手牌（枚举弃牌选择）
-- 目标类型：`AnyEnemy` 逐个目标枚举；`AllEnemies` 全体；`Self` 自己；`RandomEnemy` 不建模
+- `ShriekPower`（骇鳗尖啸）：未格挡伤害把 HP 打到 ≤ 层数时，敌人被眩晕并跳过本回合攻击、移除该能力；毒 tick 同样触发
+- `VigorPower`（活力）：敌方下一次有加成攻击的伤害先加 `Vigor` 再乘虚弱/易伤；只作用第一个攻击 intent
+- `SlipperyPower`（墨宝滑溜）：每次未格挡命中最多掉 1 点 HP，并消耗 1 层；满格挡的命中不触发也不消耗
+- `SteamEruptionPower`（瀑布巨兽蒸汽喷发）：击杀不会结束战斗，改为进入倒计时，下一回合爆炸（可格挡）并自杀；`lethal` 不再成立，`engine.py` 另发 `combat.eruption` 警告
+- `Adrenaline`（肾上腺素）：0 费，回 1 能量（升级后 2）；抽 2 不可知，只建模回能并列入 `combat.solver_partial`
+- `DaggerThrow`（投掷匕首）：伤害→抽 1→弃 1；弃牌可枚举已知手牌（优先负担），也可弃刚抽到的牌，序列显示 `（弃X）` 或 `（弃抽到的牌）`；抽牌本身列 `combat.solver_partial`
+- `Survivor` 会尝试弃掉一张手牌（枚举弃牌选择）；弃牌计入本回合弃牌数
+- 目标类型：`AnyEnemy` 逐个目标枚举；`AllEnemies` 全体；`Self` 自己；`RandomEnemy` 只在场上仅 1 名存活敌人时按单体建模，多敌人仍不猜
+- 多段牌（`Repeat`）的毒/虚弱/易伤/脆弱/紧勒按段数逐次施加（例：弹跳药瓶 3×3 毒 = 9 层）
+- **按手牌/回合历史计算的牌**（0.107.1 源码验证）：
+  - `Flechettes`（飞镖）：每 1 张手牌中的技能牌打 1 段，按出牌时手牌实时计算；求解器无法模拟的技能牌也计入
+  - `PreciseCut`（精确切击）：伤害 = `CalculationBase - ExtraDamage × (出牌时手牌数 - 1)`
+  - `MementoMori`（铭记死亡）：伤害 = `CalculationBase + ExtraDamage × 本回合弃牌数`（弃牌发生在它之前才算）
+  - 三张牌的 `Calculation*`/`Calculated*`/`ExtraDamage` 变量在源码对不上时整张降级，不按固定值猜
+- `Blur`（残影）：格挡计入本回合；`BlurPower` 只保留格挡到下回合，不影响本回合掉血，列 `combat.solver_partial`
+- `Orichalcum`（奥里哈刚）：回合结束时玩家格挡为 0 则 +6 格挡（`Unpowered`，不受敏捷/脆弱影响），在敌方攻击前结算
 - 同名敌人按出现顺序标 `#1/#2`（敌人面板与建议序列一致），避免“打哪只”歧义
 - `GrandFinale`（华丽收场）只在抽牌堆为空（`DrawCount == 0`）时建模；否则列 `combat.solver_unmodeled` 原因“抽牌堆未空”
-- `Backflip` / `Finesse` 只建模格挡，抽牌列入 `combat.solver_partial`，不再因为抽牌变量整张丢弃
+- `Backflip` / `Finesse` 只建模格挡，抽牌列入 `combat.solver_partial`，不再因为抽牌变量整张丢弃（`Blur` 同理由 `DEFERRED_VARS` 处理）
+- 建议序列在 UI 中**一行一个动作**（`1. 打击→虫`），末尾另起一行给结果摘要
 
 ### 已建模 / 未建模
 
-已建模：攻击、格挡、毒、虚弱、易伤、脆弱、力量、敏捷、荆棘、紧勒、Ravenous 眩晕、StrikeDummy、PaperPhrog、PenNib、GremlinHorn、Cruelty、Debilitate、敌人 Artifact、玩家/敌人 Intangible、Fisticuffs 伤害转格挡、即时力量/敏捷能力牌、纯伤害 X 费牌，以及这些效果的组合。
+已建模：攻击、格挡、毒、虚弱、易伤、脆弱、力量、敏捷、荆棘、紧勒、Ravenous 眩晕、Shriek 眩晕、Vigor、Slippery、SteamEruption 爆炸警告、StrikeDummy、PaperPhrog、PenNib、GremlinHorn、Orichalcum、Cruelty、Debilitate、敌人 Artifact、玩家/敌人 Intangible、Fisticuffs 伤害转格挡、即时力量/敏捷能力牌、纯伤害 X 费牌、按手牌/弃牌数计算的飞镖/精确切击/铭记死亡、投掷匕首弃牌、肾上腺素回能、可格挡/不可格挡的回合结束手牌伤害、单敌人随机目标、多段 debuff，以及这些效果的组合。
 
 未建模（会显示在 `combat.solver_unmodeled`，不猜测）：
 
 - X 费复合效果牌（非纯攻击）
 - 非即时能力牌（例如 DemonForm/Accuracy/WellLaidPlans 的后续 hook）
 - 状态/诅咒/任务牌（回合结束手牌伤害已单独建模，其余未建模）
-- 带未识别 `Vars` 的牌（例如抽牌、加费、随机效果）
-- 随机目标
-- 遗物（目前只建模 `StrikeDummy`/`PaperPhrog`/`PenNib`/`GremlinHorn`；其他计数器、Orichalcum 等未建模）、药水使用、抽牌顺序、敌人本回合攻击附带的 debuff 意图
+- 带未识别 `Vars` 的牌（例如抽牌、加费、随机效果）；抽牌本身只建模同一张牌的确定性部分（格挡等），并列入 `combat.solver_partial`
+- 多敌人时的随机目标
+- 遗物（目前只建模 `StrikeDummy`/`PaperPhrog`/`PenNib`/`GremlinHorn`/`Orichalcum`；其他计数器与触发式遗物未建模）、药水使用、抽牌顺序、敌人本回合攻击附带的 debuff 意图
 
 ### 验收
 
@@ -178,6 +196,8 @@ rarityBase：Rare 3.0 / Ancient 3.5 / Uncommon 2.0 / Common 1.2 / Basic 0.5。
 - 事件描述出现「死定了/必死/再泡下去/致命」等警告时，伤害选项直接按致死处理。
 - 没有 `EventVars` 的旧日志/其他事件：伤害选项在当前 HP ≤ `40% MaxHp`（或 ≤8）时降权，避免在 A10 低血时继续赌事件。
 - 推荐文本会写明预计净损失、剩余 HP 和下一次净损失；`event.lethal` 永远排在 `event.recommend` 之前。
+
+**选牌升级的事件选项**（0.107.1 源码：`AromaOfChaos`/`SpiritGrafter`/`SapphireSeed`/`BattlewornDummy` 升级 1 张，`Trial` 升级 2 张）：选项描述含「升级一张/两张牌」时追加 `event.upgrade_target`，按 `score_card` 推荐评分最高且尚未升级的攻击/技能/能力牌（同名去重）；“升级所有牌”不追加目标。推荐的是当前卡组价值最高的牌（与营地锻造一致），不是逐卡解析升级幅度。
 
 只给出“推荐哪个选项”，不预测事件后续随机结果；先古之民页面同样按此评分。事件文本里的 `{Relic}` / `{Gold}` / `{HpLoss}` 会从 `LocString._variables` 替换；选项/事件描述缺失的 `DynamicVars`（如 `{Damage}` / `{MaxHp}`）由 C# 用 `EventVars` 填入数字，Python 同时用 `TextKey` 识别选项语义，不依赖中文标题。
 
@@ -259,9 +279,9 @@ value = nodeReward + path_penalty + riskPenalty(hp_after)
 
 ## 已知限制
 
-- 求解器只覆盖已建模牌；非即时能力牌、X 费复合效果、抽牌、随机目标会降级/排除
+- 求解器只覆盖已建模牌；非即时能力牌、X 费复合效果、抽牌、多敌人随机目标会降级/排除
 - 伤害修正已支持 `StrengthPower` / `WeakPower` / `VulnerablePower` / `ShrinkPower` / `PaperPhrog` / `PenNib` / `CrueltyPower` / `DebilitatePower`；其他遗物/附魔/能力修正未计入
-- 遗物只建模 `StrikeDummy` / `PaperPhrog` / `PenNib` / `GremlinHorn`；药水只给独立建议，不进入本回合 DFS；抽牌顺序、敌人本回合攻击附带的 debuff 未计入
+- 遗物只建模 `StrikeDummy` / `PaperPhrog` / `PenNib` / `GremlinHorn` / `Orichalcum`；药水只给独立建议，不进入本回合 DFS；抽牌顺序、敌人本回合攻击附带的 debuff 未计入
 - 毒/易伤/虚弱/紧勒已计 `ArtifactPower`，玩家/敌人 `IntangiblePower` 已计；其他特殊能力（Buffer、Thorns 玩家侧、Plating 回合结束等）仍未逐项建模
 - 卡牌 `Tags` / `Keywords` 已从 `catalog.json` 读取，用于打击/消耗/保留等粗粒度协同；但不会解析每张牌的完整条件文本
 - 地图掉血仍是**期望值**（按幕 + A10 系数缩放），不是用求解器逐场模拟；精英具体遭遇/遗物联动未知

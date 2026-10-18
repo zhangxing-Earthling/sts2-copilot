@@ -730,6 +730,72 @@ def _event_analysis(state, option, index):
     return {"index": index, "option": option, "score": score, "lethal": False, "risk": False, "note": ""}
 
 
+_EVENT_UPGRADE_ALL_WORDS = ("所有", "全部", "每张", "all cards", "each card")
+
+
+def _event_upgrade_count(option) -> int:
+    """How many chosen cards the option upgrades (0 = not a deck-upgrade choice)."""
+    if option.get("Locked") or option.get("Proceed"):
+        return 0
+    text = _event_option_text(option).lower()
+    if "升级" not in text and "upgrade" not in text:
+        return 0
+    if "牌组" not in text and "deck" not in text:
+        # "gain an upgraded card" is not a deck-card selection.
+        return 0
+    if any(word in text for word in _EVENT_UPGRADE_ALL_WORDS):
+        # "upgrade all cards" does not need a target recommendation.
+        return 0
+    if any(word in text for word in ("两张", "2 张", "2张", "two cards", "2 cards")):
+        return 2
+    if any(word in text for word in ("一张", "1 张", "1张", "one card", "a card")):
+        return 1
+    return 0
+
+
+def _upgrade_candidates(state, count: int):
+    """Best unupgraded deck cards for an upgrade choice (deduped by card id)."""
+    cards = [
+        card for card in _deck(state)
+        if int(card.get("Upgraded") or 0) == 0 and int(card.get("Type") or 0) in (1, 2, 3)
+    ]
+    ranked = sorted(cards, key=lambda card: -score_card(state, card))
+    picked, seen = [], set()
+    for card in ranked:
+        key = str(card.get("Id") or card.get("Name") or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        picked.append(card)
+        if len(picked) >= count:
+            break
+    return picked
+
+
+def _event_upgrade_advice(state, best, analysis):
+    """Recommend which card to upgrade when an event option upgrades cards.
+
+    0.107.1 events that upgrade a chosen deck card: AromaOfChaos, SpiritGrafter,
+    SapphireSeed, BattlewornDummy (1) and Trial (2).  "Upgrade all cards" is
+    excluded because no choice is involved.
+    """
+    counts = {item["index"]: _event_upgrade_count(item["option"]) for item in analysis}
+    chosen = [item for item in analysis if counts.get(item["index"], 0) > 0]
+    if not chosen:
+        return None
+    target = next((item for item in chosen if item["index"] == best["index"]), chosen[0])
+    picked = _upgrade_candidates(state, counts[target["index"]])
+    if not picked:
+        return None
+    names = "、".join(
+        f"{card.get('Name', '?')}（评分 {score_card(state, card):.1f}）" for card in picked
+    )
+    if target["index"] == best["index"]:
+        return _advice("event.upgrade_target", f"升级推荐：{names}", "info")
+    title = target["option"].get("Title") or "升级选项"
+    return _advice("event.upgrade_target", f"若选「{title}」：升级推荐 {names}", "info")
+
+
 def _event(state):
     title = str(state.get("EventTitle") or state.get("EventId") or "事件")
     description = str(state.get("EventDescription") or "")
@@ -781,6 +847,10 @@ def _event(state):
         f"（评分 {best['score']:.1f}）{suffix}",
         "warn" if has_risk or best["risk"] else "good",
     ))
+
+    upgrade = _event_upgrade_advice(state, best, analysis)
+    if upgrade:
+        advice.append(upgrade)
 
     return advice
 
@@ -962,12 +1032,16 @@ def _sequence_parts(result):
             text += f"→{labels[play.target_index]}"
         if play.discard_index is not None:
             text += f"（弃{cards.get(play.discard_index, '?')}）"
+        elif play.discard_drawn:
+            text += "（弃抽到的牌）"
         parts.append(text)
     return parts
 
 
 def _format_sequence(result):
-    return " → ".join(_sequence_parts(result))
+    """Format the advised plays one per line (the UI renders "\\n")."""
+    parts = _sequence_parts(result)
+    return "".join(f"\n  {index}. {part}" for index, part in enumerate(parts, 1))
 
 
 def _potion_damage_options(state):
@@ -1018,11 +1092,18 @@ def _potion_kill_advice(state, result):
     for card in state.get("Hand") or []:
         if int(card.get("Type") or 0) == 1:
             max_attack = max(max_attack, int(card.get("Damage") or 0) * max(1, int(card.get("Hits") or 1)))
+    unblockable = result.outcome.end_turn_unblockable
+    if unblockable >= end_damage:
+        note = "不可格挡"
+    elif unblockable > 0:
+        note = f"其中 {unblockable} 点不可格挡"
+    else:
+        note = "可格挡"
     options = _potion_damage_options(state)
     for name, damage, _ in options:
         effective = min(1, damage) if intangible else damage
         if effective + max_attack >= enemy_hp:
-            return f"先用{name}（{effective} 伤害）+ 最高伤害牌（约 {max_attack}），本回合先杀，避免回合结束的 {end_damage} 点不可格挡伤害。"
+            return f"先用{name}（{effective} 伤害）+ 最高伤害牌（约 {max_attack}），本回合先杀，避免回合结束的 {end_damage} 点伤害（{note}）。"
     return None
 
 
@@ -1247,9 +1328,13 @@ def _combat_solver(state):
     hp_after = result.outcome.hp_after
 
     if result.plays:
-        head = f"最优顺序：{_format_sequence(result)}"
+        # One action per line: the advice box is a TextBlock with TextWrapping,
+        # so "\n" renders as a line break and long sequences stay readable.
+        head = f"最优顺序：{_format_sequence(result)}\n"
+        separator = ""
     else:
         head = "本回合不出牌最优"
+        separator = "；"
 
     if hp_after <= 0:
         severity = "danger"
@@ -1269,15 +1354,18 @@ def _combat_solver(state):
 
     advice.append(_advice(
         "combat.solver",
-        f"{head}；{tail}（能量 {used_energy}/{int(state.get('Energy', 0))}，"
+        f"{head}{separator}{tail}（能量 {used_energy}/{int(state.get('Energy', 0))}，"
         f"有效伤害 {outgoing}，格挡 +{block_gain}）",
         severity))
 
     detail = (
         f"敌方受击后剩 {result.outcome.enemy_hp_left} HP；"
-        f"敌方总攻击 {result.outcome.incoming}，我方格挡 {result.block_left}，"
+        f"敌方总攻击 {result.outcome.incoming}，我方格挡 {result.outcome.block_used}，"
         f"结算后 HP {hp_after}/{int(state.get('MaxHp', 0) or 0)}"
     )
+    relic_block = max(0, result.outcome.block_used - result.block_left)
+    if relic_block:
+        detail += f"（含遗物 {relic_block} 格挡）"
     if result.outcome.poison_kills:
         detail += f"；毒将在敌方回合开始击杀 {result.outcome.poison_kills} 个敌人"
     advice.append(_advice("combat.solver_detail", detail, "info"))
@@ -1309,7 +1397,7 @@ def _combat_solver(state):
         if kill_advice:
             advice.append(_advice("potion.lethal", kill_advice, "danger"))
         elif result.outcome.hp_after <= 0 and is_block_potion:
-            if result.outcome.end_turn_damage >= int(state.get("Hp", 0)):
+            if result.outcome.end_turn_unblockable >= int(state.get("Hp", 0)):
                 advice.append(_advice(
                     "potion.lethal",
                     "回合结束手牌伤害不可格挡且已致死；格挡药水无效，必须弃掉对应状态牌或改打法。",
@@ -1406,21 +1494,57 @@ def _combat_rough(state):
     return advice
 
 
+def _enemy_power(enemy: dict, *names: str) -> int:
+    powers = enemy.get("Powers") or {}
+    for name in names:
+        raw = powers.get(name)
+        if raw is None:
+            continue
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
+def _eruption_warnings(state):
+    """SteamEruptionPower: the kill is not the end of the fight."""
+    out = []
+    hp = int(state.get("Hp") or 0)
+    for enemy in state.get("Enemies") or []:
+        amount = _enemy_power(enemy, "SteamEruptionPower", "SteamEruption")
+        if amount <= 0:
+            continue
+        name = enemy.get("Name") or "敌人"
+        fatal = amount >= hp
+        text = (
+            f"{name} 击杀后不会死亡：改为进入蒸汽喷发倒计时，下一回合爆炸"
+            f"（当前 {amount} 点，可格挡，受虚弱/易伤修正）。"
+        )
+        if fatal:
+            text += f"当前 HP {hp} ≤ 爆炸伤害：击杀会致死，本回合优先格挡/抬血，或这回合不要击杀。"
+        else:
+            text += "击杀前留够格挡或先抬血。"
+        out.append(_advice("combat.eruption", text, "danger" if fatal else "warn"))
+    return out
+
+
 def _combat(state):
     solved, solver = _combat_solver(state)
     rough = _combat_rough(state)
+    eruption = _eruption_warnings(state)
     if solved is not None:
         extras = [
             item for item in rough
             if item["ruleId"].startswith("resources.") or item["ruleId"].startswith("potion.")
         ]
-        return solved + extras, solver
+        return solved[:1] + eruption + solved[1:] + extras, solver
 
     error = (solver or {}).get("error")
     advice = []
     if error and error != "手牌为空":
         advice.append(_advice("combat.solver_unavailable", f"未使用求解器：{error}", "info"))
-    return advice + rough, solver
+    return advice + eruption + rough, solver
 
 
 def _overview(state):

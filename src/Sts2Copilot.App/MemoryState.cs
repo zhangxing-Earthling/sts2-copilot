@@ -1722,6 +1722,17 @@ public sealed class MemoryReader : IDisposable
                             continue;
                         }
 
+                        // Property-based lambdas (e.g. WaterfallGiant's
+                        // () => CurrentPressureGunDamage) target the monster
+                        // itself, and its metadata lists const fields before the
+                        // instance ones. Reading a const (_endCombatBgmFlag = 5)
+                        // made that intent look like a 5-damage attack while the
+                        // real hit was 20/25. Only instance data can be damage.
+                        if (IsStaticField(field))
+                        {
+                            continue;
+                        }
+
                         try
                         {
                             baseDamage = closure.ReadField<int>(field.Name);
@@ -1743,6 +1754,18 @@ public sealed class MemoryReader : IDisposable
         return (baseDamage, Math.Max(1, ReadInt(intent, "_repeat")));
     }
 
+    private static bool IsStaticField(ClrInstanceField field)
+    {
+        try
+        {
+            return (field.Attributes & System.Reflection.FieldAttributes.Static) != 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private static int IntentDamage(int baseDamage, int repeat, ClrObject attacker, ClrObject target)
     {
         if (baseDamage <= 0)
@@ -1750,8 +1773,11 @@ public sealed class MemoryReader : IDisposable
             return 0;
         }
 
-        // Mirror Hook.ModifyDamage: additive (Strength), then multiplicative (Weak/Vulnerable).
-        decimal damage = baseDamage + GetPowerAmount(attacker, "StrengthPower");
+        // Mirror Hook.ModifyDamage: additive (Strength, Vigor), then
+        // multiplicative (Weak/Vulnerable). VigorPower is additive damage on the
+        // next powered attack and is consumed after it.
+        decimal damage = baseDamage + GetPowerAmount(attacker, "StrengthPower")
+            + GetPowerAmount(attacker, "VigorPower");
         if (GetPowerAmount(attacker, "WeakPower") > 0)
         {
             damage *= 0.75m;

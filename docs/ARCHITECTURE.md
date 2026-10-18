@@ -117,11 +117,13 @@ python py\tools\calibrate.py --last 10
 
 - MAE / 偏差 / 误差 ≤1 比例
 - 是否按建议出牌：优先用精确 `card_play` 事件；旧日志没有时回退到 `action.played`
-- 斩杀误报；旧日志缺 `combat_end` 时用遭遇变化识别新战斗，避免把正确斩杀算成误报
-- 最差回合
+- 斩杀误报；旧日志缺 `combat_end` 时用遭遇变化识别新战斗，避免把正确斩杀算成误报；`lethal_false_followed` 只统计“按建议出牌后仍误报”的真模型误差
+- 最差回合（带 `Encounter`，因为 `Turn` 会在每场战斗重置）
 - 未建模牌频率
 
 旧日志没有 `solver` 字段时计为 missing，不会当成 0 误差。
+
+`--replay` 忽略日志里当时代码写入的 `solver`，用当前 `py/rules/combat.solve()` 重放每个 `turn.state` 再对比 HP。日志内嵌 solver 是旧代码的产物，规则改动只有用 replay 才能在同一批历史回合上量化；两次输出都保留 `mode` 字段。
 
 ## 日志交接与规则优化
 

@@ -51,6 +51,35 @@ KNOWN_VARS = {
     "StranglePower",
 }
 
+# Vars whose effect does not change this turn's HP outcome.  A card that also
+# has a deterministic immediate effect is still modeled for that part; the
+# ignored effect is reported through `partial` instead of dropping the card.
+DEFERRED_VARS = {
+    # Draw is unknowable without the draw pile order; the played cards stay
+    # deterministic (Backflip/Finesse block, Acrobatics discard, ...).
+    "Cards": "抽牌未计",
+    # BlurPower only keeps block for the next turn, so this turn's block is exact.
+    "Blur": "下回合保留格挡未计",
+}
+
+# Calculation vars.  Their value is computed from the live hand, so they must
+# not be treated as a flat effect; only the two cards verified against the
+# 0.107.1 source are interpreted (see _calculation_model).
+CALC_VARS = {
+    "CalculationBase",
+    "CalculationExtra",
+    "CalculatedDamage",
+    "CalculatedHits",
+    "ExtraDamage",
+}
+
+# Cards whose hardcoded (non-Var) effect is only partly modeled: the draw is not
+# knowable from the state, so it stays out of the DFS and is reported as partial.
+PARTIAL_NOTES = {
+    "DaggerThrow": "只建模伤害/弃牌；抽 1 未计",
+    "Adrenaline": "只建模回能；抽 2 未计",
+}
+
 
 @dataclass(frozen=True)
 class Play:
@@ -60,6 +89,9 @@ class Play:
     discard_index: int | None = None
     target_all: bool = False
     upgrade_level: int = 0
+    # The card draws before discarding and the solver discards that drawn card
+    # (the only known-safe default when the drawn card is unknown).
+    discard_drawn: bool = False
 
 
 @dataclass(frozen=True)
@@ -85,6 +117,27 @@ class Card:
     block_from_damage: bool = False
     is_attack: bool = False
     upgrade_level: int = 0
+    is_skill: bool = False
+    # Flechettes: hit count is the number of skill cards in hand at play time.
+    hits_from_hand_skills: bool = False
+    # Skill cards in hand that the solver cannot play (unmodeled), counted as
+    # a constant because they never leave the simulated hand.
+    hand_skill_offset: int = 0
+    # PreciseCut: damage = base - extra * (hand size at play time - 1).
+    hand_scaled_damage: tuple[int, int] | None = None
+    # MementoMori: damage = base + extra * (cards discarded this turn).
+    damage_per_discard: tuple[int, int] | None = None
+    # Cards in hand that the solver does not track (unmodeled/over the cap).
+    hand_card_offset: int = 0
+    # DaggerThrow draws 1 before discarding, so the discard may be the drawn
+    # card; the solver then also offers "discard nothing known".
+    discard_may_be_drawn: bool = False
+    # End-of-turn self damage: Beckon/BadLuck/Regret use ValueProp.Unblockable,
+    # Burn/Decay/Infection/Toxic/Wither are normal blockable damage.
+    end_turn_unblockable: bool = False
+    # Adrenaline: gain energy immediately (the draw is unknown and reported
+    # through PARTIAL_NOTES).
+    energy_gain: int = 0
 
 
 @dataclass(frozen=True)
@@ -111,6 +164,16 @@ class Enemy:
     death_spawn: bool = False
     artifact: int = 0
     debilitate: int = 0
+    # ShriekPower: unblocked damage that leaves the enemy at or below this HP
+    # stuns it, so it skips the current attack.
+    shriek: int = 0
+    # VigorPower: additive damage on the enemy's next powered attack.
+    vigor: int = 0
+    # SteamEruptionPower: killing the owner does not end the fight; it turns
+    # into an explosion next turn, so a kill is not lethal.
+    eruption: int = 0
+    # SlipperyPower: each unblocked hit loses at most 1 HP and consumes a stack.
+    slippery: int = 0
 
 
 @dataclass(frozen=True)
@@ -131,6 +194,7 @@ class Player:
     intangible: bool = False
     pen_nib: int = -1
     gremlin_horn: bool = False
+    orichalcum: bool = False
 
 
 @dataclass(frozen=True)
@@ -139,6 +203,8 @@ class SimState:
     enemies: tuple[Enemy, ...]
     hand: tuple[Card, ...]
     start_hp: int = 0
+    # Cards discarded by the player this turn (MementoMori scales on it).
+    discards: int = 0
 
 
 @dataclass(frozen=True)
@@ -150,6 +216,12 @@ class Outcome:
     incoming: int
     poison_kills: int
     end_turn_damage: int = 0
+    # Part of end_turn_damage that ignores block (Beckon/BadLuck/Regret).
+    end_turn_unblockable: int = 0
+    # Block available when the enemies act (player block + relic block such as
+    # Orichalcum). `SolverResult.block_left` stays the player's own block
+    # because potion advice adds to it.
+    block_used: int = 0
 
 
 @dataclass(frozen=True)
@@ -196,6 +268,14 @@ def _power(powers: dict, *names: str) -> int:
     return 0
 
 
+def _is_nonzero(value) -> bool:
+    """True for a numeric var; malformed values must not crash the service."""
+    try:
+        return abs(float(value or 0)) > 1e-9
+    except (TypeError, ValueError):
+        return False
+
+
 def _immediate_stat_power(card_id: str) -> bool:
     """Power cards are only playable in this-turn model if they immediately
     change Strength/Dexterity, which changes later attacks/blocks this turn.
@@ -213,6 +293,62 @@ def _immediate_stat_power(card_id: str) -> bool:
         and effect.get("target") == "self"
         and effect.get("power") in ("StrengthPower", "DexterityPower")
     )
+
+
+@dataclass(frozen=True)
+class Calculation:
+    """Live-hand / live-history values of a card, resolved at play time."""
+
+    hits_from_hand_skills: bool = False
+    hand_scaled_damage: tuple[int, int] | None = None
+    damage_per_discard: tuple[int, int] | None = None
+
+
+def _calculation_model(card_id: str, vars_: dict) -> Calculation | None:
+    """Resolve cards whose value is computed from the live hand/history.
+
+    Verified against the 0.107.1 decompiled source:
+
+    * ``Flechettes``: ``CalculatedHits = CalculationBase + CalculationExtra *
+      (number of Skill cards in hand)`` with base 0 / extra 1.  Each hit deals
+      ``Damage``.
+    * ``PreciseCut``: ``CalculatedDamage = CalculationBase + ExtraDamage *
+      -(hand size - 1)``, i.e. 2 less damage per card in hand.
+    * ``MementoMori``: ``CalculatedDamage = CalculationBase + ExtraDamage *
+      (cards discarded this turn)``.
+
+    Returns ``None`` when the card is not one of these calculators or the vars
+    do not match the source (a game update must not silently produce a wrong
+    flat value).
+    """
+    base = vars_.get("CalculationBase")
+    if card_id == "Flechettes":
+        extra = vars_.get("CalculationExtra")
+        if base is None or extra is None:
+            return None
+        try:
+            if int(base) == 0 and int(extra) == 1:
+                return Calculation(hits_from_hand_skills=True)
+        except (TypeError, ValueError):
+            return None
+        return None
+    if card_id == "PreciseCut":
+        extra = vars_.get("ExtraDamage")
+        if base is None or extra is None:
+            return None
+        try:
+            return Calculation(hand_scaled_damage=(int(base), int(extra)))
+        except (TypeError, ValueError):
+            return None
+    if card_id == "MementoMori":
+        extra = vars_.get("ExtraDamage")
+        if base is None or extra is None:
+            return None
+        try:
+            return Calculation(damage_per_discard=(int(base), int(extra)))
+        except (TypeError, ValueError):
+            return None
+    return None
 
 
 def compile_card(raw: dict, index: int) -> tuple[Card | None, str | None]:
@@ -238,10 +374,14 @@ def compile_card(raw: dict, index: int) -> tuple[Card | None, str | None]:
     vars_ = raw.get("Vars") or {}
     if not isinstance(vars_, dict):
         vars_ = {}
+    calculation = _calculation_model(card_id, vars_)
+    # Adrenaline's energy gain is deterministic; its draw is not.
+    energy_gain = _num(vars_, "Energy") if card_id == "Adrenaline" else 0
+    known = KNOWN_VARS | (CALC_VARS if calculation is not None else set())
+    if energy_gain > 0:
+        known = known | {"Energy"}
     unknown = sorted(
-        key
-        for key, value in vars_.items()
-        if key not in KNOWN_VARS and abs(float(value or 0)) > 1e-9
+        key for key, value in vars_.items() if key not in known and _is_nonzero(value)
     )
     if unknown:
         return None, "未建模变量：" + "/".join(unknown)
@@ -265,11 +405,10 @@ def compile_card(raw: dict, index: int) -> tuple[Card | None, str | None]:
     has_enemy_effect = (
         damage > 0 or poison > 0 or weak > 0 or vulnerable > 0 or frail > 0 or strangle > 0
     )
-    if has_enemy_effect:
-        if target == TARGET_RANDOM:
-            return None, "随机目标"
-        if target not in (TARGET_ANY, TARGET_ALL):
-            return None, "目标类型未建模"
+    if has_enemy_effect and target not in (TARGET_ANY, TARGET_ALL, TARGET_RANDOM):
+        # Random targets are only usable when exactly one enemy is alive; the
+        # caller resolves that from the enemy list instead of guessing.
+        return None, "目标类型未建模"
 
     if card_type == 3:
         if not _immediate_stat_power(card_id):
@@ -277,7 +416,7 @@ def compile_card(raw: dict, index: int) -> tuple[Card | None, str | None]:
         if has_enemy_effect or block > 0 or not (strength > 0 or dexterity > 0):
             return None, "能力牌（非即时力量/敏捷未建模）"
 
-    if not has_enemy_effect and block <= 0 and strength <= 0 and dexterity <= 0:
+    if not has_enemy_effect and block <= 0 and strength <= 0 and dexterity <= 0 and energy_gain <= 0:
         return None, "没有可模拟的即时效果"
     if costs_x:
         if damage <= 0:
@@ -300,16 +439,50 @@ def compile_card(raw: dict, index: int) -> tuple[Card | None, str | None]:
             frail=frail,
             strength=strength,
             dexterity=dexterity,
-            discard=1 if card_id == "Survivor" else 0,
+            discard=1 if card_id in ("Survivor", "DaggerThrow") else 0,
+            discard_may_be_drawn=card_id == "DaggerThrow",
             is_strike="strike" in card_id.lower() or "Strike" in model_catalog.card_tags(card_id),
             strangle=strangle,
             costs_x=costs_x,
             block_from_damage=card_id == "Fisticuffs",
             is_attack=card_type == 1,
             upgrade_level=max(0, int(raw.get("Upgraded") or 0)),
+            is_skill=card_type == 2,
+            hits_from_hand_skills=calculation.hits_from_hand_skills if calculation else False,
+            hand_scaled_damage=calculation.hand_scaled_damage if calculation else None,
+            damage_per_discard=calculation.damage_per_discard if calculation else None,
+            energy_gain=energy_gain,
         ),
         None,
     )
+
+
+def _deferred_card(raw: dict, index: int) -> tuple[Card | None, str | None]:
+    """Model the deterministic part of a card whose remaining vars are deferred.
+
+    Draw order and next-turn block retention do not change this turn's HP, so a
+    card like Backflip (block + draw) or Blur (block + retain) is still usable
+    for its block.  The ignored effect is reported as partial; if the card has
+    no deterministic part, it stays unmodeled with the original reason.
+    """
+    vars_ = raw.get("Vars")
+    if not isinstance(vars_, dict):
+        return None, None
+    ignored: list[str] = []
+    for key in vars_:
+        if key not in DEFERRED_VARS:
+            continue
+        if _is_nonzero(vars_[key]):
+            ignored.append(key)
+    if not ignored:
+        return None, None
+    slim = dict(raw)
+    slim["Vars"] = {key: value for key, value in vars_.items() if key not in ignored}
+    card, _ = compile_card(slim, index)
+    if card is None:
+        return None, None
+    notes = "；".join(DEFERRED_VARS[key] for key in sorted(ignored))
+    return card, "只建模即时效果；" + notes
 
 
 def _vulnerable_multiplier(player: Player, enemy: Enemy) -> float:
@@ -329,9 +502,9 @@ def _vulnerable_multiplier(player: Player, enemy: Enemy) -> float:
     return multiplier
 
 
-def _attack_value(card: Card, player: Player, enemy: Enemy) -> int:
+def _attack_value(card: Card, player: Player, enemy: Enemy, damage: int | None = None) -> int:
     """Damage of one hit, before block. The caller repeats it card.hits times."""
-    per_hit = card.damage + player.strength
+    per_hit = (card.damage if damage is None else damage) + player.strength
     if card.is_strike:
         per_hit += player.strike_bonus
     if player.weak > 0:
@@ -354,8 +527,11 @@ def _enemy_attack_value(enemy: Enemy, player: Player) -> int:
     if enemy.stunned:
         return 0
     total = 0
-    for attack in enemy.attacks:
-        per_hit = attack.base + enemy.strength
+    for index, attack in enumerate(enemy.attacks):
+        # VigorPower is additive damage on the next powered attack (VigorPower.
+        # ModifyDamageAdditive), applied before the Weak multiplier and only
+        # consumed by the first attack command.
+        per_hit = attack.base + enemy.strength + (enemy.vigor if index == 0 else 0)
         if enemy.weak > 0:
             per_hit *= 0.5 if enemy.debilitate > 0 else 0.75
         if player.vulnerable > 0:
@@ -367,20 +543,33 @@ def _enemy_attack_value(enemy: Enemy, player: Player) -> int:
     return total
 
 
-def _hit(enemy: Enemy, amount: int) -> tuple[Enemy, int]:
-    """Apply one hit; returns (new enemy, damage counted for Fisticuffs).
+def _hit(enemy: Enemy, amount: int) -> tuple[Enemy, int, int]:
+    """Apply one hit; returns (new enemy, damage counted for Fisticuffs, hp lost).
 
     ``TotalDamage + OverkillDamage`` matches the game's Fisticuffs formula:
-    blocked + unblocked damage, plus any excess beyond the target's HP.
+    blocked + HP loss, plus any excess beyond the target's HP.
     """
     if enemy.intangible and amount > 1:
         amount = 1
     blocked = min(enemy.block, amount)
     unblocked = amount - blocked
-    overkill = max(0, unblocked - max(0, enemy.hp))
+    hp_loss = unblocked
+    slippery = enemy.slippery
+    if slippery > 0 and hp_loss > 0:
+        # SlipperyPower.ModifyHpLostAfterOsty clamps the HP loss to 1; the
+        # damage result itself is recorded as 1 and the stack is consumed.
+        hp_loss = 1
+    overkill = max(0, hp_loss - max(0, enemy.hp))
+    hp = max(0, enemy.hp - hp_loss)
     return (
-        replace(enemy, block=enemy.block - blocked, hp=enemy.hp - unblocked),
-        amount + overkill,
+        replace(
+            enemy,
+            block=enemy.block - blocked,
+            hp=hp,
+            slippery=slippery - 1 if (slippery > 0 and unblocked > 0) else slippery,
+        ),
+        blocked + hp_loss + overkill,
+        hp_loss,
     )
 
 
@@ -399,6 +588,27 @@ def _apply_debuff(enemy: Enemy, field: str, amount: int) -> Enemy:
     return replace(enemy, **{field: getattr(enemy, field) + amount})
 
 
+def _apply_stacks(
+    enemies: list[Enemy], targets: list[int], field: str, amount: int, times: int
+) -> None:
+    """Apply a debuff once per hit (Repeat means the effect is applied N times)."""
+    if amount <= 0 or times <= 0:
+        return
+    for index in targets:
+        if enemies[index].hp <= 0:
+            continue
+        for _ in range(times):
+            enemies[index] = _apply_debuff(enemies[index], field, amount)
+
+
+def _maybe_shriek_stun(enemy: Enemy) -> Enemy:
+    """ShriekPower 0.107.1: unblocked damage leaving HP <= amount stuns the
+    owner (it skips the current attack) and removes the power."""
+    if enemy.shriek <= 0 or enemy.hp <= 0 or enemy.hp > enemy.shriek:
+        return enemy
+    return replace(enemy, stunned=True, shriek=0)
+
+
 def _outcome(state: SimState) -> Outcome:
     player = state.player
     enemies = list(state.enemies)
@@ -412,26 +622,61 @@ def _outcome(state: SimState) -> Outcome:
         hp = enemy.hp - poison_damage
         deaths = 1 if hp <= 0 < enemy.hp else 0
         poison_kills += deaths
-        enemies[i] = replace(
+        updated = replace(
             enemy,
             hp=max(0, hp),
             poison=max(0, enemy.poison - 1),
             block=0 if hp <= 0 else enemy.block,
         )
+        if hp > 0 and poison_damage > 0:
+            # Poison damage counts as unblocked damage for ShriekPower, and it
+            # ticks before the intent, so the stun cancels this turn's attack.
+            updated = _maybe_shriek_stun(updated)
+        enemies[i] = updated
 
     alive = [enemy for enemy in enemies if enemy.hp > 0]
     incoming = sum(_enemy_attack_value(enemy, player) for enemy in alive)
-    blocked_now = min(player.block, incoming)
-    end_turn_damage = sum(
-        min(1, card.end_turn_damage) if player.intangible else card.end_turn_damage
-        for card in state.hand
+    # When the last enemy dies during the player's cards the combat ends, so
+    # end-of-turn hand damage never happens (0.107.1: killing blow ends combat
+    # before the turn-end hooks). Poison kills happen later, so they do not.
+    combat_ended = not any(enemy.hp > 0 for enemy in enemies) and not any(
+        enemy.death_spawn or enemy.eruption > 0 for enemy in enemies
     )
-    hp_after_end_turn = max(0, player.hp - max(0, end_turn_damage))
+    blockable_end = 0
+    unblockable_end = 0
+    if not combat_ended:
+        for card in state.hand:
+            amount = card.end_turn_damage
+            if amount <= 0:
+                continue
+            if player.intangible:
+                amount = min(1, amount)
+            if card.end_turn_unblockable:
+                unblockable_end += amount
+            else:
+                blockable_end += amount
+
+    block_pool = player.block
+    if player.orichalcum and block_pool == 0:
+        # Orichalcum: when the turn ends with no block, gain 6 unpowered block
+        # (ValueProp.Unpowered: not modified by Dexterity/Frail).
+        block_pool += 6
+    # Blockable end-of-turn damage (Burn/Decay/Infection/Toxic/Wither) is
+    # absorbed by block before the enemies act.
+    blocked_end = min(block_pool, blockable_end)
+    block_pool -= blocked_end
+    end_turn_damage = blockable_end + unblockable_end
+    hp_after_end_turn = max(
+        0, player.hp - unblockable_end - (blockable_end - blocked_end)
+    )
+    blocked_now = min(block_pool, incoming)
     hp_after = max(0, hp_after_end_turn - (incoming - blocked_now))
     # Include self-damage already taken this turn (ThornsPower, Beckon, etc.).
     loss = max(0, state.start_hp - hp_after)
     enemy_hp_left = sum(enemy.hp + enemy.block for enemy in alive)
-    lethal = not alive and not any(enemy.death_spawn for enemy in enemies)
+    lethal = not alive and not any(
+        enemy.death_spawn or enemy.eruption > 0 for enemy in enemies
+    )
     return Outcome(
         lethal=lethal,
         hp_loss=loss,
@@ -440,6 +685,8 @@ def _outcome(state: SimState) -> Outcome:
         incoming=incoming,
         poison_kills=poison_kills,
         end_turn_damage=end_turn_damage,
+        end_turn_unblockable=unblockable_end,
+        block_used=block_pool,
     )
 
 
@@ -488,13 +735,28 @@ def _play(
         hits = card.hits
     if cost > state.player.energy:
         return None
-    if card.discard and len([c for c in state.hand if c.index != card.index]) < card.discard:
-        return None
 
     player = state.player
     enemies = list(state.enemies)
     hand = [c for c in state.hand if c.index != card.index]
-    energy = player.energy - cost
+    if card.hits_from_hand_skills:
+        # Flechettes: one hit per Skill card still in hand. Unmodeled skills
+        # never leave the simulated hand, so they are a constant offset.
+        hits = card.hand_skill_offset + sum(1 for c in hand if c.is_skill)
+    card_damage = card.damage
+    if card.hand_scaled_damage is not None:
+        # PreciseCut: 2 less damage per card in hand, counting its own card.
+        base, extra = card.hand_scaled_damage
+        hand_size = card.hand_card_offset + len(state.hand)
+        card_damage = max(0, base - extra * (hand_size - 1))
+    if card.damage_per_discard is not None:
+        # MementoMori: base + extra per card discarded this turn.
+        base, extra = card.damage_per_discard
+        card_damage = max(0, base + extra * state.discards)
+    if card.discard and len(hand) < card.discard and not card.discard_may_be_drawn:
+        return None
+
+    energy = player.energy - cost + card.energy_gain
     block = player.block
     hp = player.hp
     strength = player.strength
@@ -512,7 +774,7 @@ def _play(
     damage_done = 0
     pen_nib = player.pen_nib
     pen_nib_ready = pen_nib == 9
-    if card.damage > 0:
+    if card_damage > 0:
         for index in targets:
             for _ in range(hits):
                 if enemies[index].hp <= 0:
@@ -521,11 +783,13 @@ def _play(
                 # per hit. It is blockable and can kill the player.
                 if enemies[index].thorns > 0:
                     hp, block = _damage_player(hp, block, enemies[index].thorns)
-                amount = _attack_value(card, player, enemies[index])
+                amount = _attack_value(card, player, enemies[index], card_damage)
                 if pen_nib_ready:
                     amount *= 2
-                enemies[index], dealt = _hit(enemies[index], amount)
+                enemies[index], dealt, unblocked = _hit(enemies[index], amount)
                 damage_done += dealt
+                if unblocked > 0:
+                    enemies[index] = _maybe_shriek_stun(enemies[index])
 
     if pen_nib >= 0 and card.is_attack:
         pen_nib = (pen_nib + 1) % 10
@@ -542,33 +806,23 @@ def _play(
         block += damage_done
 
     if card.poison > 0:
-        for index in targets:
-            if enemies[index].hp > 0:
-                enemies[index] = _apply_debuff(enemies[index], "poison", card.poison)
+        _apply_stacks(enemies, targets, "poison", card.poison, hits)
 
     if card.weak > 0:
-        for index in targets:
-            if enemies[index].hp > 0:
-                enemies[index] = _apply_debuff(enemies[index], "weak", card.weak)
+        _apply_stacks(enemies, targets, "weak", card.weak, hits)
 
     if card.vulnerable > 0:
-        for index in targets:
-            if enemies[index].hp > 0:
-                enemies[index] = _apply_debuff(enemies[index], "vulnerable", card.vulnerable)
+        _apply_stacks(enemies, targets, "vulnerable", card.vulnerable, hits)
 
     if card.frail > 0:
-        for index in targets:
-            if enemies[index].hp > 0:
-                enemies[index] = _apply_debuff(enemies[index], "frail", card.frail)
+        _apply_stacks(enemies, targets, "frail", card.frail, hits)
 
     if card.strength > 0:
         strength += card.strength
     if card.dexterity > 0:
         dexterity += card.dexterity
     if card.strangle > 0:
-        for index in targets:
-            if enemies[index].hp > 0:
-                enemies[index] = _apply_debuff(enemies[index], "strangle", card.strangle)
+        _apply_stacks(enemies, targets, "strangle", card.strangle, hits)
 
     # StranglePower triggers after each subsequent card played by the applier.
     # Snapshot the amount before this card so Strangle does not trigger on itself.
@@ -590,8 +844,14 @@ def _play(
                 stunned=True,
             )
 
-    if card.discard and discard_index is not None:
-        hand = [c for c in hand if c.index != discard_index]
+    discards = state.discards
+    if card.discard:
+        if discard_index is not None:
+            hand = [c for c in hand if c.index != discard_index]
+            discards += 1
+        elif card.discard_may_be_drawn:
+            # The freshly drawn card is discarded; that is still a discard.
+            discards += 1
 
     return replace(
         state,
@@ -606,6 +866,7 @@ def _play(
         ),
         enemies=tuple(enemies),
         hand=tuple(hand),
+        discards=discards,
     )
 
 
@@ -628,6 +889,10 @@ class Solver:
             discards: tuple[int | None, ...] = (None,)
             if card.discard:
                 discards = tuple(c.index for c in state.hand if c.index != card.index)
+                if card.discard_may_be_drawn:
+                    # DaggerThrow draws before discarding, so discarding the
+                    # drawn card leaves the known hand intact.
+                    discards += (None,)
             spends: tuple[int | None, ...] = (
                 tuple(range(1, state.player.energy + 1)) if card.costs_x else (None,)
             )
@@ -645,6 +910,7 @@ class Solver:
                             target_all=card.target == TARGET_ALL
                             and card.damage + card.poison + card.weak + card.vulnerable + card.strangle > 0,
                             upgrade_level=card.upgrade_level,
+                            discard_drawn=card.discard_may_be_drawn and discard is None,
                         )
 
     def solve(self) -> tuple[tuple[Play, ...], SimState, bool]:
@@ -671,13 +937,16 @@ class Solver:
             state.player.intangible,
             state.player.pen_nib,
             state.player.gremlin_horn,
+            state.player.orichalcum,
             tuple(
                 (e.hp, e.block, e.strength, e.weak, e.vulnerable, e.poison,
                  e.thorns, e.strangle, e.ravenous, e.stunned, e.intangible,
-                 e.death_spawn, e.artifact, e.debilitate)
+                 e.death_spawn, e.artifact, e.debilitate, e.shriek, e.vigor, e.eruption,
+                 e.slippery)
                 for e in state.enemies
             ),
             tuple(sorted(c.index for c in state.hand)),
+            state.discards,
         )
         if key in self.memo:
             return self.memo[key]
@@ -747,6 +1016,7 @@ def build_solver(state: dict) -> tuple[Solver | None, tuple[Card, ...], tuple[tu
         intangible=_power(powers, "IntangiblePower", "Intangible") > 0,
         pen_nib=pen_nib,
         gremlin_horn=model_catalog.has_relic(state, "GremlinHorn", "地精角"),
+        orichalcum="ORICHALCUM" in relic_ids or "Orichalcum" in relic_names,
     )
 
     if player.hp <= 0:
@@ -794,6 +1064,10 @@ def build_solver(state: dict) -> tuple[Solver | None, tuple[Card, ...], tuple[tu
                 ),
                 artifact=_power(enemy_powers, "ArtifactPower", "Artifact"),
                 debilitate=_power(enemy_powers, "DebilitatePower", "Debilitate"),
+                shriek=_power(enemy_powers, "ShriekPower", "Shriek"),
+                vigor=_power(enemy_powers, "VigorPower", "Vigor"),
+                eruption=_power(enemy_powers, "SteamEruptionPower", "SteamEruption"),
+                slippery=_power(enemy_powers, "SlipperyPower", "Slippery"),
             )
         )
 
@@ -818,6 +1092,11 @@ def build_solver(state: dict) -> tuple[Solver | None, tuple[Card, ...], tuple[tu
                     amount = int(raw.get(effect.get("amount") or "") or 0)
             if amount > 0:
                 burden_indices.add(index)
+                # HpLoss-based burdens (Beckon/BadLuck/Regret) are Unblockable;
+                # Damage-based ones (Burn/Decay/Infection/Toxic/Wither) are
+                # normal blockable damage.
+                amount_key = str(effect.get("amount") or "").lower()
+                unblockable = amount_key == "hploss" or raw.get("Id") == "Regret"
                 modeled.append(Card(
                     index=index,
                     name=name,
@@ -833,8 +1112,10 @@ def build_solver(state: dict) -> tuple[Solver | None, tuple[Card, ...], tuple[tu
                     strength=0,
                     dexterity=0,
                     end_turn_damage=amount,
+                    end_turn_unblockable=unblockable,
                 ))
                 partial.append((name, "回合结束手牌伤害计入；弃牌可移除"))
+    alive_count = sum(1 for enemy in enemies if enemy.hp > 0)
     draw_count = int(state.get("DrawCount") or 0)
     for index, raw in enumerate(hand_raw[:MAX_HAND]):
         if index in burden_indices:
@@ -845,25 +1126,41 @@ def build_solver(state: dict) -> tuple[Solver | None, tuple[Card, ...], tuple[tu
             unmodeled.append((name, "抽牌堆未空"))
             continue
         card, reason = compile_card(raw, index)
-        if card is None and str(raw.get("Id") or "") in ("Backflip", "Finesse"):
-            # These cards have a deterministic block component and a draw
-            # component. Model the block; report the draw as partial instead of
-            # discarding the whole card.
-            partial_raw = dict(raw)
-            vars_ = raw.get("Vars")
-            if isinstance(vars_, dict):
-                partial_raw["Vars"] = {
-                    key: value for key, value in vars_.items() if key in KNOWN_VARS
-                }
-            card, reason = compile_card(partial_raw, index)
-            if card is not None:
-                modeled.append(card)
-                partial.append((name, "只建模格挡；抽牌未计"))
+        note: str | None = None
+        if card is None:
+            card, note = _deferred_card(raw, index)
+        if card is not None and card.target == TARGET_RANDOM:
+            if alive_count != 1:
+                # Random targeting cannot be predicted with several enemies.
+                unmodeled.append((name, "随机目标（场上多名敌人）"))
                 continue
+            # Only one enemy can be hit, so the random target is deterministic.
+            card = replace(card, target=TARGET_ANY)
         if card is None:
             unmodeled.append((name, reason or "未建模"))
         else:
             modeled.append(card)
+            if note:
+                partial.append((name, note))
+            card_id = str(raw.get("Id") or "")
+            if card_id in PARTIAL_NOTES:
+                partial.append((name, PARTIAL_NOTES[card_id]))
+
+    # Flechettes/PreciseCut read the live hand. Cards the solver cannot play
+    # never leave the simulated hand, so count them once as an offset.
+    raw_hand = hand_raw[:MAX_HAND]
+    modeled_indices = {card.index for card in modeled}
+    untracked = [raw for index, raw in enumerate(raw_hand) if index not in modeled_indices]
+    untracked_skills = sum(1 for raw in untracked if int(raw.get("Type") or 0) == 2)
+    if any(card.hits_from_hand_skills or card.hand_scaled_damage is not None for card in modeled):
+        modeled = [
+            replace(
+                card,
+                hand_skill_offset=untracked_skills,
+                hand_card_offset=len(untracked),
+            )
+            for card in modeled
+        ]
 
     if player.gremlin_horn:
         partial.append(("GremlinHorn", "击杀回能计入；抽 1 未计"))

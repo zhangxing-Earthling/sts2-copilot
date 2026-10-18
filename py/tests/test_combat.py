@@ -566,6 +566,278 @@ class CombatSolverTests(unittest.TestCase):
         self.assertEqual(result.outcome.hp_loss, 5)
         self.assertEqual(result.partial[0][0], "后空翻")
 
+    def test_blur_block_is_modeled_and_retain_is_partial(self):
+        # Blur: 5 block now, BlurPower only keeps the block next turn, so this
+        # turn's prediction is exact and the retain is reported as partial.
+        result = self.solve(state(
+            [
+                card("Blur", "残影", 1, 2, 1, block=5, vars={"Block": 5, "Blur": 1}),
+                card("StrikeSilent", "打击", 1, 1, 2, damage=6),
+            ],
+            [enemy("虫", 40, damage=10)],
+            energy=2,
+        ))
+        self.assertEqual(result.block_left, 5)
+        self.assertEqual(result.outcome.hp_loss, 5)
+        self.assertNotIn("残影", [name for name, _ in result.unmodeled])
+        self.assertIn("残影", [name for name, _ in result.partial])
+
+    def test_flechettes_hits_scale_with_skill_cards_in_hand(self):
+        # Flechettes deals 5 damage per Skill card in hand, including skills the
+        # solver cannot play (Acrobatics draws, so it stays unmodeled).
+        flechettes = card(
+            "Flechettes", "飞镖", 1, 1, 2, damage=5,
+            vars={"Damage": 5, "CalculationBase": 0, "CalculationExtra": 1,
+                  "CalculatedHits": 0},
+        )
+        acrobatics = card("Acrobatics", "杂技", 1, 2, 1, vars={"Cards": 3})
+        result = self.solve(state(
+            [
+                flechettes,
+                card("DefendSilent", "防御", 1, 2, 1, block=5),
+                card("DefendSilent", "防御", 1, 2, 1, block=5),
+                acrobatics,
+            ],
+            [enemy("虫", 40)],
+            energy=3,
+        ))
+        # Three skill cards are in hand: two Defends + Acrobatics.
+        self.assertEqual(result.damage_dealt, 15)
+        self.assertNotIn("飞镖", [name for name, _ in result.unmodeled])
+        self.assertIn("杂技", [name for name, _ in result.unmodeled])
+
+    def test_precise_cut_damage_drops_with_hand_size(self):
+        precise_cut = card(
+            "PreciseCut", "精确切击", 0, 1, 2, damage=13,
+            vars={"CalculationBase": 13, "ExtraDamage": 2, "CalculatedDamage": 13},
+        )
+        result = self.solve(state(
+            [
+                precise_cut,
+                card("DefendSilent", "防御", 1, 2, 1, block=5),
+                card("DefendSilent", "防御", 1, 2, 1, block=5),
+            ],
+            [enemy("虫", 40)],
+            energy=0,
+        ))
+        # 13 - 2 * (3 cards - 1) = 9.
+        self.assertEqual(result.damage_dealt, 9)
+        self.assertNotIn("精确切击", [name for name, _ in result.unmodeled])
+
+    def test_random_target_is_modeled_when_only_one_enemy_is_alive(self):
+        ricochet = card("Ricochet", "连续反弹", 2, 1, 4, damage=3, hits=4,
+                        vars={"Damage": 3, "Repeat": 4})
+        result = self.solve(state(
+            [ricochet],
+            [enemy("虫", 12, damage=8)],
+            energy=2,
+        ))
+        self.assertTrue(result.outcome.lethal)
+        self.assertEqual(result.damage_dealt, 12)
+        self.assertEqual(result.unmodeled, ())
+
+    def test_random_target_stays_unmodeled_with_two_enemies(self):
+        ricochet = card("Ricochet", "连续反弹", 2, 1, 4, damage=3, hits=4,
+                        vars={"Damage": 3, "Repeat": 4})
+        result = self.solve(state(
+            [ricochet],
+            [enemy("虫", 12, damage=8), enemy("虫", 12, damage=8)],
+            energy=2,
+        ))
+        self.assertNotIn("连续反弹", [p.name for p in result.plays])
+        self.assertIn("连续反弹", [name for name, _ in result.unmodeled])
+
+    def test_orichalcum_grants_six_block_when_turn_ends_without_block(self):
+        result = self.solve(state(
+            [card("StrikeSilent", "打击", 1, 1, 2, damage=6)],
+            [enemy("虫", 40, damage=10)],
+            energy=1,
+            relic_ids=["Orichalcum"],
+        ))
+        # 6 unpowered block from Orichalcum; 10 - 6 = 4 damage.
+        self.assertEqual(result.outcome.hp_loss, 4)
+
+    def test_orichalcum_does_not_trigger_with_block_left(self):
+        # A 5 block Defend ends the turn with block, so Orichalcum stays idle
+        # and the solver prefers to skip it: 10 - 6 = 4 beats 10 - 5 = 5.
+        result = self.solve(state(
+            [card("DefendSilent", "防御", 1, 2, 1, block=5)],
+            [enemy("虫", 40, damage=10)],
+            energy=1,
+            relic_ids=["Orichalcum"],
+        ))
+        self.assertEqual(result.outcome.hp_loss, 4)
+        self.assertEqual(result.block_left, 0)
+
+    def test_dagger_throw_discards_a_burden(self):
+        # DaggerThrow deals damage, draws 1, then discards 1. The draw is
+        # unknowable, but the discard can dump an end-of-turn burden.
+        dagger = card("DaggerThrow", "投掷匕首", 1, 1, 2, damage=12)
+        beckon = {
+            "Id": "Beckon", "Name": "呼唤", "Cost": 1, "CostsX": False, "Type": 2,
+            "Target": 1, "Playable": False, "Damage": 0, "Block": 0, "Poison": 0,
+            "Hits": 1, "Vars": {"HpLoss": 6},
+        }
+        result = self.solve(state(
+            [dagger, beckon, card("StrikeSilent", "打击", 1, 1, 2, damage=6)],
+            [enemy("虫", 60, damage=10)],
+            energy=3,
+        ))
+        self.assertEqual([p.name for p in result.plays][0], "投掷匕首")
+        self.assertEqual(result.plays[0].discard_index, 1)
+        # Discarding the burden removes its end-of-turn damage.
+        self.assertEqual(result.outcome.end_turn_damage, 0)
+
+    def test_dagger_throw_is_playable_without_another_card_to_discard(self):
+        result = self.solve(state(
+            [card("DaggerThrow", "投掷匕首", 1, 1, 2, damage=12)],
+            [enemy("虫", 40)],
+            energy=1,
+        ))
+        self.assertEqual([p.name for p in result.plays], ["投掷匕首"])
+        self.assertEqual(result.damage_dealt, 12)
+        self.assertEqual(result.unmodeled, ())
+        self.assertIn("投掷匕首", [name for name, _ in result.partial])
+
+    def test_dagger_throw_shows_discard_advice_without_a_burden(self):
+        result = engine.advise(state(
+            [card("DaggerThrow", "投掷匕首", 1, 1, 2, damage=12)],
+            [enemy("虫", 40)],
+            energy=1,
+        ))
+        text = next(item for item in result["advice"] if item["ruleId"] == "combat.solver")["text"]
+        self.assertIn("投掷匕首→虫（弃抽到的牌）", text)
+
+    def test_memento_mori_scales_with_discards_this_turn(self):
+        # MementoMori: 11 + 5 per card discarded this turn (0.107.1 source).
+        memento = card(
+            "MementoMori", "铭记死亡", 1, 1, 2, damage=16,
+            vars={"CalculationBase": 11, "ExtraDamage": 5, "CalculatedDamage": 11},
+        )
+        survivor = card("Survivor", "生存者", 1, 2, 1, block=8)
+        result = self.solve(state(
+            [survivor, memento, card("DefendSilent", "防御", 1, 2, 1, block=5)],
+            [enemy("虫", 40)],
+            energy=2,
+        ))
+        self.assertEqual([p.name for p in result.plays][0], "生存者")
+        # Survivor discards one card, then MementoMori deals 11 + 5.
+        self.assertEqual(result.damage_dealt, 16)
+
+    def test_memento_mori_without_discard_uses_base(self):
+        memento = card(
+            "MementoMori", "铭记死亡", 1, 1, 2, damage=16,
+            vars={"CalculationBase": 11, "ExtraDamage": 5, "CalculatedDamage": 11},
+        )
+        result = self.solve(state([memento], [enemy("虫", 40)], energy=1))
+        self.assertEqual(result.damage_dealt, 11)
+
+    def test_shriek_power_stuns_when_hp_drops_to_threshold(self):
+        # ShriekPower 70: unblocked damage that leaves 100 HP at <= 70 stuns the
+        # enemy (TerrorEel), so it skips this turn's attack.
+        result = self.solve(state(
+            [card("StrikeSilent", "打击", 1, 1, 2, damage=30)],
+            [enemy("骇鳗", 100, damage=10, powers={"ShriekPower": 70})],
+            energy=1,
+        ))
+        self.assertEqual(result.outcome.hp_loss, 0)
+        self.assertEqual(result.outcome.enemy_hp_left, 70)
+
+    def test_shriek_power_does_not_stun_above_threshold(self):
+        result = self.solve(state(
+            [card("StrikeSilent", "打击", 1, 1, 2, damage=10)],
+            [enemy("骇鳗", 100, damage=10, powers={"ShriekPower": 70})],
+            energy=1,
+        ))
+        self.assertEqual(result.outcome.hp_loss, 10)
+
+    def test_vigor_adds_damage_before_weak(self):
+        # VigorPower 6 is additive on the next powered attack, before Weak.
+        result = self.solve(state(
+            [card("DefendSilent", "防御", 1, 2, 1, block=5)],
+            [enemy("骇鳗", 100, damage=16, powers={"VigorPower": 6, "WeakPower": 1})],
+            energy=1,
+        ))
+        # floor((16 + 6) * 0.75) = 16, minus 5 block = 11.
+        self.assertEqual(result.outcome.incoming, 16)
+        self.assertEqual(result.outcome.hp_loss, 11)
+
+    def test_steam_eruption_kill_is_not_lethal(self):
+        # WaterfallGiant: SteamEruptionPower turns a lethal hit into a delayed
+        # explosion, so the solver must not claim the combat is over.
+        result = self.solve(state(
+            [card("StrikeSilent", "打击", 1, 1, 2, damage=12)],
+            [enemy("瀑布巨兽", 10, damage=20, powers={"SteamEruptionPower": 20})],
+            energy=1,
+        ))
+        self.assertFalse(result.outcome.lethal)
+        self.assertEqual(result.outcome.enemy_hp_left, 0)
+        self.assertEqual(result.outcome.hp_loss, 0)
+
+    def test_engine_warns_about_steam_eruption(self):
+        result = engine.advise(state(
+            [card("StrikeSilent", "打击", 1, 1, 2, damage=6)],
+            [enemy("瀑布巨兽", 100, damage=10, powers={"SteamEruptionPower": 42})],
+            energy=1,
+        ))
+        warning = next(item for item in result["advice"] if item["ruleId"] == "combat.eruption")
+        self.assertIn("42", warning["text"])
+        self.assertIn("蒸汽喷发", warning["text"])
+
+    def test_engine_marks_steam_eruption_fatal_when_hp_is_low(self):
+        result = engine.advise(state(
+            [card("StrikeSilent", "打击", 1, 1, 2, damage=6)],
+            [enemy("瀑布巨兽", 100, damage=10, powers={"SteamEruptionPower": 42})],
+            energy=1,
+            hp=13,
+        ))
+        warning = next(item for item in result["advice"] if item["ruleId"] == "combat.eruption")
+        self.assertEqual(warning["severity"], "danger")
+        self.assertIn("击杀会致死", warning["text"])
+
+    def test_solver_sequence_is_one_action_per_line(self):
+        result = engine.advise(state(
+            [
+                card("StrikeSilent", "打击", 1, 1, 2, damage=6),
+                card("StrikeSilent", "打击", 1, 1, 2, damage=6),
+            ],
+            [enemy("虫", 40, damage=8)],
+            energy=2,
+        ))
+        text = next(item for item in result["advice"] if item["ruleId"] == "combat.solver")["text"]
+        self.assertIn("\n  1. 打击→虫", text)
+        self.assertIn("\n  2. 打击→虫", text)
+        self.assertNotIn(" → ", text)
+
+    def test_malformed_var_value_does_not_crash_solver(self):
+        weird = card("Mystery", "神秘", 1, 1, 2, damage=5,
+                     vars={"Damage": 5, "Cards": "???"})
+        result = self.solve(state([weird], [enemy("虫", 30)], energy=1))
+        self.assertEqual(result.damage_dealt, 5)
+        self.assertEqual(result.outcome.hp_loss, 0)
+
+    def test_solver_detail_reports_orichalcum_block(self):
+        result = engine.advise(state(
+            [card("StrikeSilent", "打击", 1, 1, 2, damage=6)],
+            [enemy("虫", 40, damage=10)],
+            energy=1,
+            relic_ids=["Orichalcum"],
+        ))
+        detail = next(item for item in result["advice"] if item["ruleId"] == "combat.solver_detail")
+        self.assertIn("含遗物 6 格挡", detail["text"])
+
+    def test_bouncing_flask_applies_poison_once_per_repeat(self):
+        flask = card("BouncingFlask", "弹跳药瓶", 2, 2, 4, poison=3, hits=3,
+                     vars={"PoisonPower": 3, "Repeat": 3})
+        result = self.solve(state(
+            [flask],
+            [enemy("虫", 50)],
+            energy=2,
+        ))
+        # 3 applications of 3 poison = 9 poison, which ticks once: 50 - 9 = 41.
+        self.assertEqual(result.outcome.enemy_hp_left, 41)
+        self.assertEqual(result.unmodeled, ())
+
     def test_ravenous_ally_death_stuns_survivor(self):
         result = self.solve(state(
             [card("StrikeSilent", "打击", 1, 1, 2, damage=6)],
@@ -661,16 +933,11 @@ class CombatSolverTests(unittest.TestCase):
         self.assertEqual(result.outcome.hp_loss, 0)
         self.assertIsNotNone(result.plays[0].discard_index)
 
-    def test_lethal_but_player_death_is_a_warning(self):
-        beckon = {
-            "Id": "Beckon", "Name": "呼唤", "Cost": 1, "CostsX": False,
-            "Type": 4, "Target": 0, "Rarity": 5, "Upgraded": 0,
-            "Playable": False, "Damage": 0, "Block": 0, "Poison": 0, "Hits": 1,
-            "Vars": {"HpLoss": 6},
-        }
+    def test_thorns_mutual_death_is_a_warning(self):
+        # Killing the last enemy with Thorns up can still kill the player.
         result = engine.advise(state(
-            [card("StrikeSilent", "打击", 1, 1, 2, damage=6), beckon],
-            [enemy("虫", 1)],
+            [card("StrikeSilent", "打击", 1, 1, 2, damage=6)],
+            [enemy("虫", 1, powers={"ThornsPower": 6})],
             energy=1,
             hp=6,
             potions=["格挡药水"],
@@ -681,7 +948,87 @@ class CombatSolverTests(unittest.TestCase):
         self.assertIn("同归于尽", solver["text"])
         self.assertNotIn("可斩杀", solver["text"])
         potion = next(item for item in result["advice"] if item["ruleId"] == "potion.lethal")
-        self.assertIn("格挡药水无效", potion["text"])
+        self.assertIn("格挡药水", potion["text"])
+
+    def test_end_turn_burden_is_skipped_when_combat_ends(self):
+        # 0.107.1 log: killing the last enemy ends combat before the turn-end
+        # hand damage, so Beckon must not be counted.
+        beckon = {
+            "Id": "Beckon", "Name": "呼唤", "Cost": 1, "CostsX": False,
+            "Type": 4, "Target": 0, "Rarity": 5, "Upgraded": 0,
+            "Playable": False, "Damage": 0, "Block": 0, "Poison": 0, "Hits": 1,
+            "Vars": {"HpLoss": 6},
+        }
+        result = self.solve(state(
+            [card("StrikeSilent", "打击", 1, 1, 2, damage=6), beckon],
+            [enemy("虫", 1)],
+            energy=1,
+            hp=6,
+        ))
+        self.assertTrue(result.outcome.lethal)
+        self.assertEqual(result.outcome.hp_loss, 0)
+        self.assertEqual(result.outcome.hp_after, 6)
+
+    def test_infection_at_turn_end_is_blockable(self):
+        infection = {
+            "Id": "Infection", "Name": "感染", "Cost": -1, "CostsX": False,
+            "Type": 4, "Target": 0, "Rarity": 5, "Upgraded": 0,
+            "Playable": False, "Damage": 3, "Block": 0, "Poison": 0, "Hits": 1,
+            "Vars": {"Damage": 3},
+        }
+        result = self.solve(state(
+            [card("DefendSilent", "防御", 1, 2, 1, block=5), infection],
+            [enemy("虫", 30)],
+            energy=1,
+        ))
+        self.assertEqual(result.outcome.end_turn_damage, 3)
+        self.assertEqual(result.outcome.end_turn_unblockable, 0)
+        self.assertEqual(result.outcome.hp_loss, 0)
+
+    def test_beckon_at_turn_end_ignores_block(self):
+        beckon = {
+            "Id": "Beckon", "Name": "呼唤", "Cost": 1, "CostsX": False,
+            "Type": 4, "Target": 0, "Rarity": 5, "Upgraded": 0,
+            "Playable": False, "Damage": 0, "Block": 0, "Poison": 0, "Hits": 1,
+            "Vars": {"HpLoss": 6},
+        }
+        result = self.solve(state(
+            [card("DefendSilent", "防御", 1, 2, 1, block=5), beckon],
+            [enemy("虫", 30)],
+            energy=0,
+        ))
+        self.assertEqual(result.outcome.end_turn_unblockable, 6)
+        self.assertEqual(result.outcome.hp_loss, 6)
+
+    def test_adrenaline_gains_energy_and_reports_draw_partial(self):
+        adrenaline = card("Adrenaline", "肾上腺素", 0, 2, 1, vars={"Energy": 1, "Cards": 2})
+        result = self.solve(state(
+            [
+                adrenaline,
+                card("StrikeSilent", "打击", 1, 1, 2, damage=6),
+                card("StrikeSilent", "打击", 1, 1, 2, damage=6),
+            ],
+            [enemy("虫", 20)],
+            energy=1,
+        ))
+        # The 0-cost +1 energy gain lets both Strikes be played (12 damage).
+        self.assertEqual(result.damage_dealt, 12)
+        self.assertIn("肾上腺素", [name for name, _ in result.partial])
+
+    def test_slippery_power_caps_the_first_hit(self):
+        # Inklets: SlipperyPower 1 clamps the first unblocked hit to 1 HP and
+        # is consumed, so the second strike deals full damage.
+        result = self.solve(state(
+            [
+                card("StrikeSilent", "打击", 1, 1, 2, damage=6),
+                card("StrikeSilent", "打击", 1, 1, 2, damage=6),
+            ],
+            [enemy("墨宝", 20, powers={"SlipperyPower": 1})],
+            energy=2,
+        ))
+        self.assertEqual(result.damage_dealt, 7)
+        self.assertEqual(result.outcome.enemy_hp_left, 13)
+
 
     def test_damage_potion_can_finish_before_unblockable_end_damage(self):
         beckon = {

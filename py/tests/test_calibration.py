@@ -162,6 +162,37 @@ class CalibrationTests(unittest.TestCase):
         ]
         result = calibrate.analyze_events(events)
         self.assertEqual(result.lethal_false, 1)
+        # No card_play events, so the sequence cannot be confirmed as followed.
+        self.assertEqual(result.lethal_false_followed, 0)
+
+    def test_lethal_false_counts_followed_plays_as_model_error(self):
+        events = [
+            turn(1, 70, solver(70, lethal=True)),
+            {"type": "card_play", "payload": {"Name": "打击", "Target": "虫"}},
+            turn(2, 63, solver(63)),
+        ]
+        result = calibrate.analyze_events(events)
+        self.assertEqual(result.lethal_false, 1)
+        self.assertEqual(result.lethal_false_followed, 1)
+
+    def test_lethal_false_is_not_a_model_error_when_player_diverges(self):
+        events = [
+            turn(1, 70, solver(70, lethal=True)),
+            {"type": "card_play", "payload": {"Name": "防御", "Target": None}},
+            turn(2, 63, solver(63)),
+        ]
+        result = calibrate.analyze_events(events)
+        self.assertEqual(result.lethal_false, 1)
+        self.assertEqual(result.lethal_false_followed, 0)
+
+    def test_sample_keeps_encounter_name(self):
+        events = [
+            turn(3, 70, solver(60), encounter="LagavulinMatriarchBoss"),
+            turn(4, 58, solver(58), encounter="LagavulinMatriarchBoss"),
+        ]
+        result = calibrate.analyze_events(events)
+        self.assertEqual(result.samples[0].encounter, "LagavulinMatriarchBoss")
+        self.assertIn("encounter", calibrate.to_json(result)["samples"][0])
 
     def test_new_encounter_without_combat_end_is_not_lethal_false(self):
         # The app can miss combat_end when CombatState stays non-null between
@@ -181,6 +212,63 @@ class CalibrationTests(unittest.TestCase):
         ]
         result = calibrate.analyze_events(events)
         self.assertEqual(result.lethal_false, 1)
+
+    def test_replay_mode_ignores_the_logged_solver(self):
+        events = [
+            turn(1, 70, solver(60, hp_loss=10)),
+            turn(2, 58, solver(58)),
+            {"type": "combat_end", "payload": {"Hp": 58}},
+        ]
+        seen = []
+
+        def resolve(state):
+            seen.append(state)
+            return {
+                "HpAfter": 65,
+                "HpLoss": 5,
+                "Lethal": False,
+                "Sequence": [],
+                "Unmodeled": ["杂技"],
+                "Truncated": False,
+            }
+
+        result = calibrate.analyze_events(events, "run.jsonl", resolve)
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(result.samples[0].predicted_hp, 65)
+        self.assertEqual(result.samples[0].error, -7)
+        self.assertEqual(result.unmodeled["杂技"], 2)
+
+    def test_replay_resolver_uses_current_rules_code(self):
+        resolver = calibrate.replay_resolver()
+        payload = {
+            "ValidationError": None,
+            "InCombat": True,
+            "Hp": 70,
+            "MaxHp": 70,
+            "Block": 0,
+            "Energy": 3,
+            "MaxEnergy": 3,
+            "DrawCount": 0,
+            "PlayerPowers": {},
+            "Enemies": [{
+                "Name": "虫", "Hp": 6, "MaxHp": 6, "Block": 0,
+                "Damage": 8, "Hits": 1, "Powers": {},
+                "Attacks": [{"BaseDamage": 8, "Hits": 1}],
+            }],
+            "Hand": [{
+                "Id": "StrikeSilent", "Name": "打击", "Cost": 1, "Type": 1, "Target": 2,
+                "Damage": 6, "Hits": 1, "Vars": {"Damage": 6},
+            }],
+            "DeckCards": [],
+            "Relics": [],
+            "RelicIds": [],
+            "RelicCounters": {},
+        }
+        solved = resolver(payload)
+        self.assertIsNotNone(solved)
+        self.assertEqual(solved["HpAfter"], 70)
+        self.assertTrue(solved["Lethal"])
+        self.assertEqual(solved["Sequence"], ["打击"])
 
     def test_json_file_round_trip(self):
         events = [

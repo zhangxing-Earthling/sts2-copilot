@@ -28,12 +28,15 @@
 ## 2. 当前状态（2026-10-18）
 
 - 分支：`main`；远程：`origin`（`git@github.com:zhangxing-Earthling/sts2-copilot.git`）。
-- 当前 HEAD：`bce49be Add rules service, run logging, model catalog and A10-oriented solver`；代码已推送。
-- 助手已发布到 `dist/Sts2Copilot/`，本机已重启；`/health` 正常时应返回 `{"ok":true,"service":"sts2-rules"}`。
-- 当前测试：**85 个 Python 单元测试全部通过**。
-- 最新分析日志：`logs/runs/run_1792328301_SDAVRTGFSN.jsonl`（A0、静默猎手、53 回合、第 17 层 Boss 死亡）。
-- 该日志校准：**52 回合，MAE 0.31，误差 ≤1 92.3%，`lethal_false=0`**。
-- 最近 5 局：**164 回合，MAE 0.67，误差 ≤1 89.6%，`lethal_false=5`**（5 条来自旧日志内嵌的旧 solver；`calibrate.py` 不会重跑新代码）。
+- 当前功能代码提交：`bce49be Add rules service, run logging, model catalog and A10-oriented solver`；其后 `252a849` 增加了本交接文档，均已在 `origin/main`。
+- 助手已发布到 `dist/Sts2Copilot/`（2026-10-18 22:30，含第九轮规则与 C# 意图修复）；本次发布后尚未启动助手，实机验证待做。`/health` 正常时应返回 `{"ok":true,"service":"sts2-rules"}`。
+- 当前测试：**121 个 Python 单元测试全部通过**。
+- 最新分析日志：`logs/runs/run_1792334448_39SXFARPJ0.jsonl`（A0、静默猎手、71 回合、第 17 层死亡）。
+- 该日志校准（日志内嵌 solver）：**70 回合，MAE 0.34，误差 ≤1 94.3%，`lethal_false=1`**。
+- 该日志 `--replay` 当前规则：**70 回合，MAE 0.31，跟随建议 MAE 0.02，误差 ≤1 94.3%，`lethal_false_followed=0`**。
+- 最近 5 局 `--replay`：**210 回合，MAE 0.58，跟随建议 MAE 0.35，误差 ≤1 89.5%，`lethal_false_followed=0`**。
+- 全部 64 份日志 replay：**346 回合、MAE 0.53、跟随 MAE 0.23、误差 ≤1 89.9%、`lethal_false_followed=0`**。
+- 残余误差来源：① 玩家未按建议出牌（主因）；② `followed` 只比牌名不比目标，同名敌人时会误判“跟随”；③ 抽牌后打出的牌无法预知（后空翻/投掷匕首/肾上腺素居多）；④ 瀑布巨兽压力枪的 C# 意图读取需实机确认（22:30 已发布，尚未重启助手验证）。
 
 注意：`calibrate.py` 读取日志中**当时代码写入的 `solver`**，所以“新代码的改进”不一定让历史日志的 MAE 自动下降。要验证新代码，重放 `turn.state` 或看 `combat.solve()` 的新输出。
 
@@ -44,6 +47,9 @@
 - 一局一个 JSONL（`runStartTime + seed`），`state_snapshot` / `turn` / `heartbeat` / `run_pause` / `run_resume` / `run_end`；应用重连/重启追加同一文件。
 - 战斗求解器 DFS：攻击/多段/全体/格挡/毒/力量/敏捷/虚弱/易伤/脆弱/Shrink/荆棘/紧勒/Ravenous/Intangible/回合结束手牌伤害/Survivor 弃牌。
 - 已补：StrikeDummy、Fisticuffs 伤害转格挡、纯伤害 X 费牌、Artifact 抵消 debuff、玩家/敌人 Intangible、即时力量/敏捷能力牌、PaperPhrog、PenNib、GremlinHorn、Cruelty、Debilitate。
+- 已补（第八轮）：`Blur` 格挡（保留格挡列 partial）、`Flechettes` 按手牌技能数动态分段、`PreciseCut` 按手牌数动态伤害、仅 1 名敌人时随机目标按单体建模、多段牌的毒/debuff 按段数施加、`Orichalcum` 回合末 6 格挡；`calibrate.py --replay` 用当前规则重放历史回合。
+- 已补（第九轮）：`ShriekPower` 阈值眩晕（骇鳗）、`VigorPower` 加算伤害、`SteamEruptionPower` 击杀不结束战斗（`combat.eruption` 警告，爆炸≥当前 HP 时 danger）、`DaggerThrow` 弃牌建模（可弃抽到的牌，序列显示弃牌）、`MementoMori` 按本回合弃牌数计算伤害；最优顺序 UI 改为一行一个动作；C# 意图读取跳过 static/const 字段并计入 Vigor。
+- 已补（第十轮）：`SlipperyPower`（每次未格挡命中最多 1 血）、回合结束手牌伤害区分可格挡（`Infection`/`Burn`/`Decay`/`Toxic`/`Wither`）与不可格挡（`Beckon`/`BadLuck`/`Regret`）、打死最后一名敌人后不再结算回合结束伤害、`Adrenaline` 回能（抽牌列 partial）；事件选牌升级新增 `event.upgrade_target`（`AromaOfChaos` 等，复用 `score_card` 选牌）。
 - 求解序列给升级牌加 `+` / `+2` 标记；`calibrate.py` 比较时会剥离标记。
 - 药水：战斗内 `potion.use`（按实际减伤/斩杀/避免死亡给具体药水与预计 HP）；非战斗 `potion.inventory`；奖励药水 `potion.reward` / `potion.discard`，满 3 格时与当前最差比较。
 - 地图：`map._map_dp` 从下一步一直算到 Boss，状态包含 HP、前一个节点类型、精英数；精英叠加/连续精英/精英后营地/低血精英有惩罚；Boss 前有安全线；A10 战斗/精英期望掉血 ×1.30、Boss 安全线提高。幕起点不在 `MapNodes` 时用 `MapChoices` 作根。完整图缺失时 `_map_lookahead` 最多 6 步局部前瞻；前两名分差 <0.5 输出 `map.close_call`。
@@ -53,7 +59,7 @@
 ## 4. 当前优先级
 
 1. **拿真正的 A10 日志**：A0 只能验证机制；优先跑 A10，按日志优化路线/精英/Boss/药水取舍。
-2. **继续降低高影响误差**：先看 `calibrate.py` 最差回合、`digest.py` 的 `event_id`、`solver.unmodeled`；高频未建模牌目前可能包括 `杂技`（抽牌）、`急躁`（抽牌/加费）、`笨拙`（状态）、`飞镖`（计算段数）、`弹跳药瓶`（随机目标）。能确定性建模才做，不能就降级，不能猜。
+2. **继续降低高影响误差**：先看 `calibrate.py --replay` 的最差回合、`digest.py` 的 `event_id`、`solver.unmodeled`；当前高频未建模是 `杂技`/`早有准备`/`急躁`（抽牌，无法只读建模）、`笨拙`/`晕眩`/`黏液`/`受伤`/`藏宝图`（状态/诅咒/任务牌，本回合无效果）、`必备工具`/`刀扇`（能力牌后续 hook）、多敌人时的 `弹跳药瓶`/`连续反弹`（随机目标）。下一件大事：**实机确认瀑布巨兽压力枪意图读到 20/25**（C# 已改并随 22:30 发布进入 dist，尚未实机验证）；若仍读到 5，再查 `IntentParts` 的委托目标。能确定性建模才做，不能就降级，不能猜。
 3. **地图评分**：已完成“下一步 = 到 Boss 的整条路径”的 DP；下一步可做的是按实际遭遇/牌组/金币修正期望值，以及 A10 样本校准，不要退回“只看下一层”。
 4. **药水**：`potion.use` 目前是求解结果后的启发式比较，不是 DFS 内动作；`RewardPotionIds` 的实机奖励屏路径还没拿到样本，需实机确认。
 5. **C# 回退**：只在关键保命规则上补；主实现始终 Python。
@@ -64,6 +70,7 @@
 
 ```powershell
 python py\tools\calibrate.py logs\runs\<run>.jsonl
+python py\tools\calibrate.py logs\runs\<run>.jsonl --replay   # 用当前规则重放
 python py\tools\digest.py logs\runs\<run>.jsonl --json --out logs\digest.json
 ```
 
@@ -75,8 +82,9 @@ python py\tools\digest.py logs\runs\<run>.jsonl --json --out logs\digest.json
 4. 改 `py/rules/engine.py` / `py/rules/combat.py`；需要时改 `py/tools/*` 或 C# 读取字段。
 5. 每轮必须跑：
    - `python -m unittest discover -s py\tests -v`
-   - `python py\tools\calibrate.py --last 5`
-6. 报告：MAE、误差 ≤1、`lethal_false`、最差回合前后变化、未建模牌、仍有限制。
+   - `python py\tools\calibrate.py --last 5`（历史 solver 基线）
+   - `python py\tools\calibrate.py --last 5 --replay`（当前代码的真实水平）
+6. 报告：MAE、误差 ≤1、`lethal_false` / `lethal_false_followed`、最差回合前后变化、未建模牌、仍有限制。
 
 不要只写复盘报告；要直接改代码并在本地验证。
 

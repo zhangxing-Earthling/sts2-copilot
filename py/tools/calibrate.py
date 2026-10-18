@@ -4,11 +4,16 @@ Usage:
     python py\\tools\\calibrate.py
     python py\\tools\\calibrate.py --last 10
     python py\\tools\\calibrate.py --json
+    python py\\tools\\calibrate.py --replay
     python py\\tools\\calibrate.py path\\to\\run.jsonl
 
 A prediction is evaluated against the next turn's starting HP, or against
 combat_end.Hp when the combat ends before another turn. Old logs without a
 `solver` field are counted as "missing", not treated as zero error.
+
+`--replay` ignores the solver stored in the log and re-solves every turn with
+the current `py/rules` code. Logged solvers were written by the code of that
+day, so replay is the only way to measure a rules change against old runs.
 """
 
 from __future__ import annotations
@@ -19,6 +24,7 @@ import json
 import os
 import re
 import statistics
+import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Iterable, Iterator
@@ -38,6 +44,7 @@ class TurnSample:
     sequence: list[str] = field(default_factory=list)
     unmodeled: list[str] = field(default_factory=list)
     truncated: bool = False
+    encounter: str = ""
 
 
 @dataclass
@@ -46,6 +53,9 @@ class Calibration:
     missing: int = 0
     errors: int = 0
     lethal_false: int = 0
+    # False lethal claims on turns where the advised sequence was actually
+    # played: those are model errors, unlike "the player did something else".
+    lethal_false_followed: int = 0
     unmodeled: Counter = field(default_factory=Counter)
 
     @property
@@ -147,8 +157,6 @@ def _finalize(pending: dict | None, actual_hp: int | None, path: str, out: Calib
     predicted = _as_int(pending["hpAfter"])
     actual = _as_int(actual_hp)
     solver = pending["solver"]
-    if _get(solver, "lethal", "Lethal") and pending["next_turn"]:
-        out.lethal_false += 1
 
     expected = [_card_name(x) for x in (_get(solver, "sequence", "Sequence") or [])]
     actual_cards = pending["actions"]
@@ -158,6 +166,13 @@ def _finalize(pending: dict | None, actual_hp: int | None, path: str, out: Calib
         followed = Counter(expected) == Counter(actual_cards)
     else:
         followed = None
+
+    if _get(solver, "lethal", "Lethal") and pending["next_turn"]:
+        out.lethal_false += 1
+        if followed is True:
+            # The advised (lethal) sequence was actually played and the combat
+            # still continued: this is a real model error, not a policy choice.
+            out.lethal_false_followed += 1
 
     predicted_loss = _as_int(_get(solver, "hpLoss", "HpLoss"), pending["state_hp"] - predicted)
     actual_loss = pending["state_hp"] - actual
@@ -175,11 +190,19 @@ def _finalize(pending: dict | None, actual_hp: int | None, path: str, out: Calib
             sequence=list(_get(solver, "sequence", "Sequence") or []),
             unmodeled=[str(x) for x in (_get(solver, "unmodeled", "Unmodeled") or [])],
             truncated=bool(_get(solver, "truncated", "Truncated")),
+            encounter=pending["encounter"],
         )
     )
 
 
-def analyze_events(events: Iterable[dict], path: str = "") -> Calibration:
+def analyze_events(
+    events: Iterable[dict], path: str = "", resolver=None
+) -> Calibration:
+    """Pair predictions with the next observed HP.
+
+    ``resolver(state)`` replaces the logged solver (replay mode); it must return
+    a solver-shaped dict or None when the state cannot be solved.
+    """
     out = Calibration()
     pending: dict | None = None
 
@@ -208,7 +231,7 @@ def analyze_events(events: Iterable[dict], path: str = "") -> Calibration:
                 _finalize(pending, hp, path, out)
                 pending = None
 
-            solver = _solver(event)
+            solver = resolver(state) if resolver is not None else _solver(event)
             if solver is None:
                 out.missing += 1
                 continue
@@ -287,29 +310,67 @@ def find_logs(runs_dir: str, last: int | None = None) -> list[str]:
     return paths
 
 
-def analyze_files(paths: Iterable[str]) -> Calibration:
+def analyze_files(paths: Iterable[str], resolver=None) -> Calibration:
     total = Calibration()
     for path in paths:
-        part = analyze_events(iter_events(path), path)
+        part = analyze_events(iter_events(path), path, resolver)
         total.samples.extend(part.samples)
         total.missing += part.missing
         total.errors += part.errors
         total.lethal_false += part.lethal_false
+        total.lethal_false_followed += part.lethal_false_followed
         total.unmodeled.update(part.unmodeled)
     return total
+
+
+def replay_resolver():
+    """Build a resolver that re-solves every turn with the current rules code.
+
+    Logged solvers were written by the code of that day; replay is how a rules
+    change is measured against old runs. The import is lazy so plain
+    calibration keeps working without the rules package on the path.
+    """
+    rules_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "rules")
+    if rules_dir not in sys.path:
+        sys.path.insert(0, rules_dir)
+    import combat  # noqa: PLC0415
+
+    def resolve(state):
+        if not isinstance(state, dict):
+            return None
+        result, _error = combat.solve(state)
+        if result is None:
+            return None
+        outcome = result.outcome
+        return {
+            "HpAfter": outcome.hp_after,
+            "HpLoss": outcome.hp_loss,
+            "Incoming": outcome.incoming,
+            "Block": result.block_left,
+            "Lethal": outcome.lethal,
+            "Sequence": [play.name for play in result.plays],
+            "Unmodeled": [name for name, _ in result.unmodeled],
+            "Partial": [name for name, _ in result.partial],
+            "Truncated": result.truncated,
+        }
+
+    return resolve
 
 
 def _pct(value: float) -> str:
     return f"{value * 100:.1f}%"
 
 
-def print_report(result: Calibration, paths: list[str], top: int = 10) -> None:
+def print_report(result: Calibration, paths: list[str], top: int = 10, replay: bool = False) -> None:
     print("StS2 Copilot - P1.5 校准")
+    print(f"模式: {'重放当前规则（忽略日志内 solver）' if replay else '日志内嵌 solver'}")
     print(f"日志文件: {len(paths)}")
     print(f"可评估回合: {result.evaluated}")
     print(f"缺少 solver（旧日志/本地回退）: {result.missing}")
     print(f"solver error: {result.errors}")
     print(f"斩杀误报（预测可杀但还有下一回合）: {result.lethal_false}")
+    if result.lethal_false_followed:
+        print(f"  其中按建议出牌仍误报（真模型误差）: {result.lethal_false_followed}")
     if result.evaluated:
         followed = result.followed
         print(f"按建议出牌: {followed} / {result.evaluated}")
@@ -325,8 +386,9 @@ def print_report(result: Calibration, paths: list[str], top: int = 10) -> None:
         for sample in sorted(result.samples, key=lambda s: abs(s.error), reverse=True)[:top]:
             sequence = " → ".join(sample.sequence) if sample.sequence else "（不出牌）"
             followed = {True: "跟随", False: "未跟随", None: "无法判断"}[sample.followed]
+            encounter = f" [{sample.encounter}]" if sample.encounter else ""
             print(
-                f"  [{os.path.basename(sample.path)}] turn {sample.turn}: "
+                f"  [{os.path.basename(sample.path)}] turn {sample.turn}{encounter}: "
                 f"预测 {sample.predicted_hp} / 实际 {sample.actual_hp} "
                 f"(误差 {sample.error:+d}, 预测掉 {sample.predicted_loss}, "
                 f"实际掉 {sample.actual_loss}, {followed})  {sequence}"
@@ -344,6 +406,7 @@ def to_json(result: Calibration) -> dict:
         "missing": result.missing,
         "errors": result.errors,
         "lethal_false": result.lethal_false,
+        "lethal_false_followed": result.lethal_false_followed,
         "mae": round(result.mae, 3),
         "bias": round(result.bias, 3),
         "within_one": round(result.within_one, 3),
@@ -365,6 +428,7 @@ def to_json(result: Calibration) -> dict:
                 "sequence": sample.sequence,
                 "unmodeled": sample.unmodeled,
                 "truncated": sample.truncated,
+                "encounter": sample.encounter,
             }
             for sample in result.samples
         ],
@@ -386,16 +450,24 @@ def main() -> None:
     parser.add_argument("--last", type=int, default=None, help="only analyze the newest N log files")
     parser.add_argument("--json", action="store_true", help="print machine-readable JSON")
     parser.add_argument("--top", type=int, default=10, help="number of worst turns to print")
+    parser.add_argument(
+        "--replay",
+        action="store_true",
+        help="re-solve every turn with the current py/rules code instead of the logged solver",
+    )
     args = parser.parse_args()
 
     paths = args.files or find_logs(args.runs, args.last)
     if not paths:
         raise SystemExit(f"no .jsonl logs found under {args.runs}")
-    result = analyze_files(paths)
+    resolver = replay_resolver() if args.replay else None
+    result = analyze_files(paths, resolver)
     if args.json:
-        print(json.dumps(to_json(result), ensure_ascii=False, indent=2))
+        payload = to_json(result)
+        payload["mode"] = "replay" if args.replay else "logged"
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
-        print_report(result, paths, args.top)
+        print_report(result, paths, args.top, replay=args.replay)
 
 
 if __name__ == "__main__":

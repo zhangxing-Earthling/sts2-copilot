@@ -65,6 +65,96 @@ class EventAndMapTests(unittest.TestCase):
         recommend = next(item for item in result["advice"] if item["ruleId"] == "event.recommend")
         self.assertIn("获得稀有遗物", recommend["text"])
 
+    def test_event_upgrade_option_recommends_target_card(self):
+        # AromaOfChaos "维持理智" upgrades one chosen deck card; the log player
+        # upgraded LegSweep, which is also the highest-scored unupgraded card.
+        state = {
+            "ValidationError": None,
+            "InEvent": True,
+            "EventId": "AromaOfChaos",
+            "EventTitle": "混沌芳香",
+            "EventDescription": "香气弥漫。",
+            "Hp": 60,
+            "MaxHp": 70,
+            "CardChoices": [],
+            "DeckCards": [
+                {"Id": "StrikeSilent", "Name": "打击", "Cost": 1, "Type": 1,
+                 "Rarity": 1, "Damage": 6, "Upgraded": 0, "Vars": {"Damage": 6}},
+                {"Id": "DefendSilent", "Name": "防御", "Cost": 1, "Type": 2,
+                 "Rarity": 1, "Block": 5, "Upgraded": 0, "Vars": {"Block": 5}},
+                {"Id": "LegSweep", "Name": "扫腿", "Cost": 2, "Type": 2,
+                 "Rarity": 3, "Block": 11, "Upgraded": 0, "Vars": {"Block": 11}},
+            ],
+            "EventOptions": [
+                option("放任自流", "变化你牌组中的一张牌。",
+                       text_key="AROMA_OF_CHAOS.pages.INITIAL.options.LET_GO"),
+                option("维持理智", "升级你牌组中的一张牌。",
+                       text_key="AROMA_OF_CHAOS.pages.INITIAL.options.MAINTAIN_CONTROL"),
+            ],
+        }
+        result = engine.advise(state)
+        target = next(item for item in result["advice"] if item["ruleId"] == "event.upgrade_target")
+        self.assertIn("扫腿", target["text"])
+        recommend = next(item for item in result["advice"] if item["ruleId"] == "event.recommend")
+        self.assertIn("维持理智", recommend["text"])
+
+    def test_event_upgrade_all_cards_needs_no_target(self):
+        state = {
+            "ValidationError": None,
+            "InEvent": True,
+            "EventTitle": "试炼",
+            "EventDescription": "升级所有牌。",
+            "Hp": 60,
+            "MaxHp": 70,
+            "DeckCards": [
+                {"Id": "StrikeSilent", "Name": "打击", "Cost": 1, "Type": 1,
+                 "Rarity": 1, "Damage": 6, "Upgraded": 0, "Vars": {"Damage": 6}},
+            ],
+            "EventOptions": [option("升级所有牌", "升级你牌组中的所有牌。")],
+        }
+        result = engine.advise(state)
+        self.assertNotIn("event.upgrade_target", [item["ruleId"] for item in result["advice"]])
+
+    def test_event_upgrade_two_cards_recommends_two_targets(self):
+        state = {
+            "ValidationError": None,
+            "InEvent": True,
+            "EventTitle": "试炼",
+            "EventDescription": "升级两张牌。",
+            "Hp": 60,
+            "MaxHp": 70,
+            "DeckCards": [
+                {"Id": "StrikeSilent", "Name": "打击", "Cost": 1, "Type": 1,
+                 "Rarity": 1, "Damage": 6, "Upgraded": 0, "Vars": {"Damage": 6}},
+                {"Id": "DefendSilent", "Name": "防御", "Cost": 1, "Type": 2,
+                 "Rarity": 1, "Block": 5, "Upgraded": 0, "Vars": {"Block": 5}},
+                {"Id": "LegSweep", "Name": "扫腿", "Cost": 2, "Type": 2,
+                 "Rarity": 3, "Block": 11, "Upgraded": 0, "Vars": {"Block": 11}},
+            ],
+            "EventOptions": [option("接受试炼", "升级你牌组中的两张牌。")],
+        }
+        result = engine.advise(state)
+        target = next(item for item in result["advice"] if item["ruleId"] == "event.upgrade_target")
+        self.assertIn("扫腿", target["text"])
+        self.assertIn("打击", target["text"])
+
+    def test_gain_an_upgraded_card_is_not_a_deck_upgrade(self):
+        state = {
+            "ValidationError": None,
+            "InEvent": True,
+            "EventTitle": "宝藏",
+            "EventDescription": "获得一张升级牌。",
+            "Hp": 60,
+            "MaxHp": 70,
+            "DeckCards": [
+                {"Id": "StrikeSilent", "Name": "打击", "Cost": 1, "Type": 1,
+                 "Rarity": 1, "Damage": 6, "Upgraded": 0, "Vars": {"Damage": 6}},
+            ],
+            "EventOptions": [option("拿走", "获得一张升级后的牌。")],
+        }
+        result = engine.advise(state)
+        self.assertNotIn("event.upgrade_target", [item["ruleId"] for item in result["advice"]])
+
     def test_event_without_options_is_context_only(self):
         state = {
             "ValidationError": None,
